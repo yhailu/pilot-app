@@ -43,6 +43,14 @@ _DEFAULT_MODEL_BY_PROVIDER = {
 }
 _DEFAULT_LOCAL_MODEL = "openai/local-model"
 
+# Per-provider fallback chain. Passed to litellm.completion(fallbacks=...)
+# so a 503/overload on the primary model automatically retries on the next.
+_DEFAULT_FALLBACKS = {
+    "gemini": ["gemini/gemini-flash-latest", "gemini/gemini-2.0-flash-001"],
+    "openai": ["openai/gpt-4o-mini"],
+    "anthropic": ["anthropic/claude-haiku-4-5"],
+}
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -180,6 +188,12 @@ class LLMClient:
             )
 
         # Standard non-streaming call
+        # Auto-populate fallbacks unless caller supplied one explicitly via extra.
+        if "fallbacks" not in extra:
+            fb = _DEFAULT_FALLBACKS.get(self.provider)
+            if fb:
+                # Don't fall back to the primary model itself.
+                extra["fallbacks"] = [m for m in fb if m != self.model]
         try:
             if temperature is None:
                 response = litellm.completion(
@@ -234,6 +248,11 @@ class LLMClient:
         Some LLM proxies require streaming mode. This method uses stream=True
         and accumulates the chunks into a plain text response.
         """
+        # Auto-populate fallbacks unless caller supplied one explicitly via extra.
+        if "fallbacks" not in extra:
+            fb = _DEFAULT_FALLBACKS.get(self.provider)
+            if fb:
+                extra["fallbacks"] = [m for m in fb if m != self.model]
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -244,6 +263,7 @@ class LLMClient:
                 "api_key": self.config.api_key or None,
                 "api_base": self.config.api_base or None,
                 "stream": True,
+                **extra,
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature

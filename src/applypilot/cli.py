@@ -451,10 +451,27 @@ def doctor() -> None:
         results.append(("Node.js (npx)", fail_mark,
                         "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
-    # CapSolver (optional)
-    capsolver = os.environ.get("CAPSOLVER_API_KEY")
+    # CapSolver (optional) — verify key via balance endpoint so invalid
+    # keys are surfaced here instead of mid-apply when a CAPTCHA appears.
+    capsolver = (os.environ.get("CAPSOLVER_API_KEY") or "").strip()
     if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
+        try:
+            import httpx
+            resp = httpx.post(
+                "https://api.capsolver.com/getBalance",
+                json={"clientKey": capsolver},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("errorId") == 0:
+                bal = data.get("balance", "?")
+                results.append(("CapSolver API key", ok_mark, f"valid, balance ${bal}"))
+            else:
+                desc = data.get("errorDescription") or data.get("errorCode") or "invalid"
+                results.append(("CapSolver API key", fail_mark, f"rejected by API: {desc}"))
+        except Exception as e:
+            results.append(("CapSolver API key", warn_mark,
+                            f"set but unverifiable: {type(e).__name__}"))
     else:
         results.append(("CapSolver API key", "[dim]optional[/dim]",
                         "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))

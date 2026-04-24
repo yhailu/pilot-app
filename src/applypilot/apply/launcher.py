@@ -111,7 +111,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -125,8 +125,15 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_sites)
             url_clauses = ""
             if blocked_patterns:
-                url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
-                params.extend(blocked_patterns)
+                # Check both url and application_url so jobs whose `url` is
+                # an aggregator (e.g. jobright.ai) but whose `application_url`
+                # resolves to a blocked site (e.g. linkedin.com) are filtered.
+                url_clauses = " ".join(
+                    "AND url NOT LIKE ? AND COALESCE(application_url, '') NOT LIKE ?"
+                    for _ in blocked_patterns
+                )
+                for p in blocked_patterns:
+                    params.extend([p, p])
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
@@ -321,9 +328,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
     mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
-    # Build claude command
+    # Build claude command. On Windows `claude` is a .CMD shim; subprocess.Popen
+    # needs the full path to execute it.
+    import shutil as _shutil
+    claude_exe = _shutil.which("claude") or "claude"
     cmd = [
-        "claude",
+        claude_exe,
         "--model", model,
         "-p",
         "--mcp-config", str(mcp_config_path),
