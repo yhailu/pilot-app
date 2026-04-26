@@ -544,6 +544,11 @@ def register_routes(app: FastAPI, *, templates_dir: Path) -> None:
     async def api_pipeline_progress():
         return streams.get_progress(streams.PIPELINE_STREAM_ID)
 
+    @app.get("/api/pipeline/last_run")
+    async def api_pipeline_last_run():
+        summary = streams.get_last_run()
+        return summary or {"present": False}
+
     @app.post("/api/pipeline/start")
     async def api_pipeline_start(request: Request):
         body: dict[str, Any] = {}

@@ -139,6 +139,97 @@ def _wait_proc(handle: StreamHandle) -> None:
         handle.done = True
         handle.buffer.append({"event": "done", "data": json.dumps({"rc": rc})})
 
+    # Snapshot a summary of this run so the dashboard can show "Last run"
+    # info that survives UI restarts. Only persist for the singleton
+    # pipeline stream — single-job retailor/reapply have their own UI.
+    if handle.stream_id == PIPELINE_STREAM_ID:
+        try:
+            _persist_last_run_snapshot(handle)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not persist last_run snapshot: %s", exc)
+
+
+def _persist_last_run_snapshot(handle: StreamHandle) -> None:
+    """Write a JSON summary of the just-finished pipeline to ~/.applypilot/last_run.json."""
+    from applypilot.config import APP_DIR
+    import sqlite3
+
+    # Compute deltas from the DB (cheap absolute counts; the snapshot before
+    # start is read from the previous last_run.json so we can show net change).
+    db_path = APP_DIR / "applypilot.db"
+    counts = {"total": 0, "tailored": 0, "applied": 0, "failed": 0}
+    if db_path.exists():
+        conn = sqlite3.connect(str(db_path))
+        try:
+            counts["total"] = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            counts["tailored"] = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL"
+            ).fetchone()[0]
+            counts["applied"] = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE apply_status='applied'"
+            ).fetchone()[0]
+            counts["failed"] = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE apply_status='failed'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    # Parse the buffer once for stage timings and stage counters.
+    with _STREAMS_LOCK:
+        events = list(handle.buffer)
+    parsed = _parse_events(
+        events,
+        recent_limit=15,
+        running=False,
+        stream_id=handle.stream_id,
+        started_at=handle.started_at,
+        kind=handle.kind,
+    )
+
+    # Compute deltas relative to whatever was in last_run.json before us.
+    snapshot_path = APP_DIR / "last_run.json"
+    prev_counts = {"total": 0, "tailored": 0, "applied": 0, "failed": 0}
+    if snapshot_path.exists():
+        try:
+            prev = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            prev_counts.update(prev.get("counts_after", {}))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    deltas = {
+        "total":    counts["total"]    - prev_counts.get("total", 0),
+        "tailored": counts["tailored"] - prev_counts.get("tailored", 0),
+        "applied":  counts["applied"]  - prev_counts.get("applied", 0),
+        "failed":   counts["failed"]   - prev_counts.get("failed", 0),
+    }
+
+    summary = {
+        "kind": handle.kind,
+        "started_at": handle.started_at,
+        "ended_at": time.time(),
+        "duration_s": time.time() - handle.started_at,
+        "rc": handle.rc,
+        "stages_seen": parsed.get("current_stage"),  # last stage observed
+        "stage_counts": parsed.get("stage_counts"),
+        "completed_recent": parsed.get("completed", [])[:10],
+        "counts_after": counts,
+        "counts_before": prev_counts,
+        "deltas": deltas,
+    }
+    snapshot_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def get_last_run() -> dict | None:
+    """Return the most recent persisted pipeline summary, or None."""
+    from applypilot.config import APP_DIR
+    snapshot_path = APP_DIR / "last_run.json"
+    if not snapshot_path.exists():
+        return None
+    try:
+        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
 
 def spawn(kind: str, url: str, argv: list[str]) -> StreamHandle:
     """Launch a subprocess in a new process group and register a stream handle."""
@@ -451,6 +542,9 @@ _NOISE_RE = _re.compile(
     r"|RuntimeWarning:"                        # generic Python warnings
     r"|coroutine\s+'[^']+'\s+was never awaited"
     r"|Enable tracemalloc"                     # Python's tracemalloc hint that follows
+    r"|^\s*[│┃║]"                             # leftover Unicode box-drawing column
+    r"|ApplyPilot Dashboard"                   # the rich-rendered dashboard frame in apply
+    r"|^\s*\+--"                              # corner of ascii box-drawing
 )
 
 

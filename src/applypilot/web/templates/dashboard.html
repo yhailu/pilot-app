@@ -3,7 +3,7 @@
 {% block breadcrumb %}Dashboard{% endblock %}
 
 {% block content %}
-<div x-data="dashboard()" x-init="load(); pollPipeline(); pollProgress(); loadProcs(); pollProcs()" class="space-y-6">
+<div x-data="dashboard()" x-init="load(); pollPipeline(); pollProgress(); loadLastRun(); loadProcs(); pollProcs()" class="space-y-6">
 
   <!-- Pipeline control panel -->
   <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
@@ -89,6 +89,51 @@
         </template>
         <div x-show="!costByDay.length" class="text-slate-500">no worker-*.log entries with total_cost_usd yet.</div>
       </div>
+    </div>
+  </div>
+
+  <!-- Last run summary (only visible when nothing is running and we have a snapshot) -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4"
+       x-show="!pipeline.running && lastRun && lastRun.ended_at">
+    <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+      <div class="text-sm font-semibold flex items-center gap-2">
+        <span>Last run</span>
+        <span class="text-xs px-2 py-0.5 rounded-full"
+              :class="lastRun?.rc === 0 ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40'
+                                        : 'bg-rose-900/40 text-rose-300 border border-rose-700/40'"
+              x-text="lastRun?.rc === 0 ? '✓ completed' : `✗ rc=${lastRun?.rc}`"></span>
+        <span class="text-xs text-slate-500" x-text="lastRun?.kind || ''"></span>
+      </div>
+      <div class="text-xs text-slate-500" x-text="lastRunSummaryRange"></div>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ jobs</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.total > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.total >= 0 ? '+' : '') + (lastRun?.deltas?.total ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ tailored</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.tailored > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.tailored >= 0 ? '+' : '') + (lastRun?.deltas?.tailored ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ applied</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.applied > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.applied >= 0 ? '+' : '') + (lastRun?.deltas?.applied ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ failed</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.failed > 0 ? 'text-rose-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.failed >= 0 ? '+' : '') + (lastRun?.deltas?.failed ?? 0)"></div>
+      </div>
+    </div>
+    <div class="mt-3 text-xs text-slate-500">
+      Last stage seen: <span class="text-slate-300" x-text="lastRun?.stages_seen || '?'"></span>
+      &middot; tailored this run: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.tailored ?? 0"></span>
+      &middot; cover letters: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.cover_letter ?? 0"></span>
+      &middot; applied: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.applied ?? 0"></span>
+      &middot; failed: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.failed ?? 0"></span>
     </div>
   </div>
 
@@ -254,15 +299,40 @@
       pipelineError: '',
       startMode: 'chain',
       progress: { current_stage: null, current_action: null, completed: [], stage_counts: {} },
+      lastRun: null,
+      get lastRunSummaryRange() {
+        if (!this.lastRun?.started_at) return '';
+        const fmt = (sec) => new Date(sec * 1000).toLocaleString();
+        const dur = this.lastRun.duration_s;
+        const m = Math.floor(dur / 60);
+        const s = Math.floor(dur % 60);
+        const durLabel = m > 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m ${s}s`;
+        return `${fmt(this.lastRun.started_at)} → ${fmt(this.lastRun.ended_at)}  ·  ${durLabel}`;
+      },
+      async loadLastRun() {
+        try {
+          const data = await (await fetch('/api/pipeline/last_run')).json();
+          this.lastRun = data?.present === false ? null : data;
+        } catch (_) { this.lastRun = null; }
+        // Re-fetch when pipeline transitions running → idle
+        // (pollProgress also covers this; keep it simple here)
+      },
       stages: ['discover', 'enrich', 'score', 'tailor', 'cover', 'pdf', 'apply'],
       get stagesPassed() {
         if (!this.progress.current_stage) return [];
         const idx = this.stages.indexOf(this.progress.current_stage);
         return idx <= 0 ? [] : this.stages.slice(0, idx);
       },
+      _wasRunning: false,
       async pollProgress() {
         try {
           this.progress = await (await fetch('/api/pipeline/progress')).json();
+          // If we just transitioned from running → idle, refresh the Last run card
+          const isRunning = !!this.pipeline.running;
+          if (this._wasRunning && !isRunning) {
+            await this.loadLastRun();
+          }
+          this._wasRunning = isRunning;
         } catch (_) {}
         setTimeout(() => this.pollProgress(), 3000);
       },
