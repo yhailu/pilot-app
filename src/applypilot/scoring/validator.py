@@ -17,6 +17,28 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def _company_aliases(company: str) -> list[str]:
+    """Split a `preserved_companies` entry on common separators into matchable aliases.
+
+    The full original is always included as an alias so existing exact-matches
+    keep passing. Single-word companies stay a one-element list.
+
+    >>> _company_aliases("ESPNBet/Penn Entertainment")
+    ['espnbet/penn entertainment', 'penn entertainment', 'espnbet']
+    >>> _company_aliases("Suvoda")
+    ['suvoda']
+    """
+    company_lc = company.lower().strip()
+    aliases = {company_lc}
+    for sep in ("/", "|", ","):
+        if sep in company_lc:
+            for part in company_lc.split(sep):
+                part = part.strip()
+                if part:
+                    aliases.add(part)
+    return sorted(aliases, key=len, reverse=True)  # longest/most specific first
+
+
 # ── Universal Constants (not personal data) ───────────────────────────────
 
 BANNED_WORDS: list[str] = [
@@ -141,12 +163,15 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
 
     if isinstance(data["experience"], list):
         for company in preserved_companies:
+            aliases = _company_aliases(company)
             has_company = any(
-                company.lower() in str(e.get("header", "")).lower()
+                any(a in str(e.get("header", "")).lower() for a in aliases)
                 for e in data["experience"]
             )
             if not has_company:
-                errors.append(f"Company '{company}' missing from experience")
+                errors.append(
+                    f"Company '{company}' missing from experience (any of: {aliases})"
+                )
         for entry in data["experience"]:
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)
@@ -222,10 +247,13 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     if full_name and full_name.lower() not in text_lower:
         warnings.append(f"Name '{full_name}' missing -- will be injected")
 
-    # 3. Check companies preserved
+    # 3. Check companies preserved (any alias counts)
     for company in resume_facts.get("preserved_companies", []):
-        if company.lower() not in text_lower:
-            errors.append(f"Company '{company}' missing -- cannot remove real experience")
+        aliases = _company_aliases(company)
+        if not any(a in text_lower for a in aliases):
+            errors.append(
+                f"Company '{company}' missing -- cannot remove real experience"
+            )
 
     # 4. Check projects preserved
     for project in resume_facts.get("preserved_projects", []):
