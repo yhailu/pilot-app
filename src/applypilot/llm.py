@@ -34,12 +34,14 @@ _INFERRED_SOURCE_ORDER: tuple[tuple[str, str], ...] = (
     ("gemini", "GEMINI_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
     ("openai", "LLM_URL"),
 )
 _DEFAULT_MODEL_BY_PROVIDER = {
     "gemini": "gemini/gemini-3.0-flash",
     "openai": "openai/gpt-5-mini",
     "anthropic": "anthropic/claude-haiku-4-5",
+    "deepseek": "deepseek/deepseek-chat",
 }
 _DEFAULT_LOCAL_MODEL = "openai/local-model"
 
@@ -49,6 +51,7 @@ _DEFAULT_FALLBACKS = {
     "gemini": ["gemini/gemini-flash-latest", "gemini/gemini-2.0-flash-001"],
     "openai": ["openai/gpt-4o-mini"],
     "anthropic": ["anthropic/claude-haiku-4-5"],
+    "deepseek": ["deepseek/deepseek-chat"],
 }
 
 

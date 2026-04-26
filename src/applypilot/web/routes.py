@@ -48,12 +48,15 @@ _MODEL_OPTIONS: list[ModelEntry] = [
     ModelEntry(id="anthropic/claude-sonnet-4-5", label="Claude Sonnet 4.5", provider="anthropic"),
     ModelEntry(id="openai/gpt-4o-mini", label="GPT-4o mini", provider="openai"),
     ModelEntry(id="openai/gpt-5-mini", label="GPT-5 mini", provider="openai"),
+    ModelEntry(id="deepseek/deepseek-chat", label="DeepSeek Chat", provider="deepseek"),
+    ModelEntry(id="deepseek/deepseek-reasoner", label="DeepSeek Reasoner", provider="deepseek"),
 ]
 
 _PROVIDER_KEY_ENV = {
     "gemini": "GEMINI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 # Cap pagination so a typo in the query string can't OOM the box.

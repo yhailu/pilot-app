@@ -50,11 +50,12 @@
           <th class="text-left px-3 py-2">Location</th>
           <th class="text-left px-3 py-2">Status</th>
           <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('discovered_at')">Discovered</th>
+          <th class="text-left px-3 py-2">Actions</th>
         </tr>
       </thead>
       <tbody>
         <template x-for="row in items" :key="row.url">
-          <tr class="border-t border-ink-700 hover:bg-ink-700/40">
+          <tr class="border-t border-ink-700 hover:bg-ink-700/40 align-top">
             <td class="px-3 py-2">
               <span class="px-1.5 py-0.5 rounded text-xs font-mono"
                     :class="scoreClass(row.fit_score)"
@@ -68,12 +69,27 @@
             <td class="px-3 py-2 text-slate-400" x-text="row.location || '—'"></td>
             <td class="px-3 py-2">
               <span class="text-xs" x-text="statusLabel(row)"></span>
+              <!-- Inline tailor progress -->
+              <div x-show="tailorState[row.url]" class="mt-1 text-[11px]">
+                <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse mr-1" x-show="tailorState[row.url]?.status === 'running'"></span>
+                <span :class="tailorState[row.url]?.status === 'done'
+                              ? (tailorState[row.url]?.rc === 0 ? 'text-emerald-400' : 'text-rose-400')
+                              : 'text-slate-400'"
+                      x-text="tailorState[row.url]?.message"></span>
+              </div>
             </td>
             <td class="px-3 py-2 text-xs text-slate-500" x-text="(row.discovered_at || '').slice(0, 16).replace('T', ' ')"></td>
+            <td class="px-3 py-2">
+              <button class="text-xs px-2 py-1 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                      :disabled="tailorState[row.url]?.status === 'running'"
+                      @click="retailor(row)"
+                      :title="row.tailored_resume_path ? 'Re-tailor with current model' : 'Tailor with current model'"
+                      x-text="row.tailored_resume_path ? '↻ Re-tailor' : '✎ Tailor'"></button>
+            </td>
           </tr>
         </template>
         <tr x-show="!items.length">
-          <td colspan="6" class="text-center text-slate-500 px-3 py-6">No jobs match the current filters.</td>
+          <td colspan="7" class="text-center text-slate-500 px-3 py-6">No jobs match the current filters.</td>
         </tr>
       </tbody>
     </table>
@@ -101,6 +117,53 @@
       sort: 'discovered_at',
       direction: 'desc',
       filters: { status: null, site: null, min_score: null, max_score: null, q: '' },
+      tailorState: {},  // url -> { status: 'running'|'done', rc, message, lines }
+      async retailor(row) {
+        // Mark this row as running and POST to start a stream
+        this.tailorState[row.url] = { status: 'running', message: 'starting…', lines: 0, rc: null };
+        let stream;
+        try {
+          const resp = await fetch(`/api/jobs/${encodeURIComponent(row.url)}/retailor`, { method: 'POST' });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            this.tailorState[row.url] = { status: 'done', rc: -1, message: 'failed: ' + (err.detail || resp.status) };
+            return;
+          }
+          stream = await resp.json();
+        } catch (e) {
+          this.tailorState[row.url] = { status: 'done', rc: -1, message: 'error: ' + e };
+          return;
+        }
+        // Subscribe to SSE for live progress
+        const es = new EventSource(`/api/streams/${stream.stream_id}`);
+        let lineCount = 0;
+        es.addEventListener('line', () => {
+          lineCount += 1;
+          this.tailorState[row.url] = { status: 'running', message: `tailoring… ${lineCount} lines`, lines: lineCount, rc: null };
+        });
+        es.addEventListener('action', () => {
+          lineCount += 1;
+          this.tailorState[row.url] = { status: 'running', message: `tailoring… ${lineCount} steps`, lines: lineCount, rc: null };
+        });
+        es.addEventListener('done', (ev) => {
+          let rc = null;
+          try { rc = JSON.parse(ev.data).rc; } catch (_) { rc = -1; }
+          this.tailorState[row.url] = {
+            status: 'done',
+            rc,
+            message: rc === 0 ? `tailored ✓ (${lineCount} lines)` : `failed (rc=${rc})`,
+          };
+          es.close();
+          // Refresh the list so the row reflects the new tailored_resume_path
+          this.load();
+        });
+        es.addEventListener('error', () => {
+          es.close();
+          if (this.tailorState[row.url]?.status === 'running') {
+            this.tailorState[row.url] = { status: 'done', rc: -1, message: 'stream lost' };
+          }
+        });
+      },
       statusPills: [
         { value: 'pending',  label: 'Pending' },
         { value: 'scored',   label: 'Scored' },
