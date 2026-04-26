@@ -447,6 +447,10 @@ _NOISE_RE = _re.compile(
     r"|LiteLLM:"                               # internal noise
     r"|^[0-9:]{8}\s+-\s+INFO\s+-\s+selected\s+model\s+name"
     r"|^[0-9:]{8}\s+-\s+INFO\s+-\s+HTTP/"
+    r"|Task was destroyed but it is pending"   # LiteLLM async cleanup warning (harmless)
+    r"|RuntimeWarning:"                        # generic Python warnings
+    r"|coroutine\s+'[^']+'\s+was never awaited"
+    r"|Enable tracemalloc"                     # Python's tracemalloc hint that follows
 )
 
 
