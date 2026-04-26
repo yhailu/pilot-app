@@ -380,3 +380,169 @@ def start_pipeline(mode: str = "chain") -> StreamHandle:
 def stop_pipeline() -> bool:
     """Terminate the singleton pipeline stream if running."""
     return kill_stream(PIPELINE_STREAM_ID)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline progress parsing — convert the raw stdout buffer into a structured
+# view the dashboard can render: current stage, current job, recent completions.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_STAGE_RE = _re.compile(r"STAGE:\s+([a-z]+)\s+[—-]")  # e.g. "STAGE: tailor — Resume tailoring..."
+_PDF_RE = _re.compile(r"PDF generated:\s*(.+)$")
+_APPLY_START_RE = _re.compile(r"\[W\d+\]\s+Starting:\s+(.+?)\s+@\s+(.+)$")
+_APPLY_DONE_RE = _re.compile(r"\[W\d+\]\s+(APPLIED|EXPIRED|CAPTCHA|FAILED|NO RESULT|SSO|LOGIN)[\s\S]*?:\s*(.+?)(?:\s|$)")
+_TAILORING_RE = _re.compile(r"Tailoring\s+(\d+)/(\d+)[:\s]\s*(.+)$", _re.IGNORECASE)
+_SCORING_RE = _re.compile(r"Scoring\s+(\d+)/(\d+)[:\s]\s*(.+)$", _re.IGNORECASE)
+
+
+def _pretty_from_pdf_path(path: str) -> dict:
+    """Extract a readable {kind, name} from a PDF generated path."""
+    p = path.replace("\\", "/").strip()
+    base = p.rsplit("/", 1)[-1]
+    if "/cover_letters/" in p or base.endswith("_CL.pdf") or base.endswith("_CL.txt"):
+        kind = "cover_letter"
+    else:
+        kind = "tailored"
+    name = base.rsplit(".", 1)[0]
+    name = _re.sub(r"_[a-f0-9]{6}(_CL)?$", "", name)  # drop hash suffix
+    name = name.replace("_", " ").strip()
+    return {"kind": kind, "name": name}
+
+
+def _events_from_latest_log() -> list[dict]:
+    """Fallback: read the latest pipeline log file and synthesize events.
+
+    Used when the in-memory StreamHandle is missing (e.g. UI restarted while
+    the chain subprocess kept running in its own process group). Picks the
+    newest log matching the pipeline-related prefixes by mtime, reads the
+    last ~2000 lines, and runs each line through the same parser the live
+    stream uses so callers can treat the result identically.
+    """
+    from applypilot.config import LOG_DIR
+
+    candidates: list[Path] = []
+    for prefix in ("chain-", "auto-loop-", "run-", "apply-"):
+        candidates.extend(LOG_DIR.glob(f"{prefix}*.log"))
+    if not candidates:
+        return []
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        with latest.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-2000:]
+    except OSError:
+        return []
+    return [parse_claude_jsonl_line(line) for line in lines]
+
+
+def get_progress(stream_id: str = PIPELINE_STREAM_ID, *, recent_limit: int = 15) -> dict:
+    """Parse the most recent buffer of a stream into structured progress info."""
+    handle = get_stream(stream_id)
+    if handle is None:
+        # Fall back to the most recent log file so progress survives UI restarts
+        # and page reloads after the chain finishes.
+        events = _events_from_latest_log()
+        if not events:
+            return {"running": False, "stream_id": stream_id, "events": 0,
+                    "completed": [], "stage_counts": {}}
+        # Continue with the parser using log-file events
+        return _parse_events(events, recent_limit=recent_limit, running=False,
+                             stream_id=stream_id, started_at=None, kind="pipeline-from-log")
+
+    with _STREAMS_LOCK:
+        events = list(handle.buffer)
+    return _parse_events(events, recent_limit=recent_limit, running=not handle.done,
+                         stream_id=stream_id, started_at=handle.started_at, kind=handle.kind)
+
+
+def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
+                  stream_id: str, started_at: float | None, kind: str) -> dict:
+    """Shared parser used by both live-buffer and log-file paths."""
+
+    current_stage = None
+    stage_started_idx = -1
+    current_action = None
+    completed: list[dict] = []
+    stage_counts = {"tailored": 0, "cover_letter": 0, "applied": 0, "failed": 0, "scored": 0}
+
+    for i, evt in enumerate(events):
+        data = evt.get("data") or ""
+        if not data:
+            continue
+
+        m = _STAGE_RE.search(data)
+        if m:
+            current_stage = m.group(1).lower()
+            stage_started_idx = i
+            # Reset current action when stage flips
+            current_action = None
+            continue
+
+        m = _PDF_RE.search(data)
+        if m:
+            info = _pretty_from_pdf_path(m.group(1))
+            completed.append({**info, "at": _extract_ts(data)})
+            stage_counts[info["kind"]] = stage_counts.get(info["kind"], 0) + 1
+            current_action = None
+            continue
+
+        m = _APPLY_START_RE.search(data)
+        if m:
+            current_action = f"Applying to: {m.group(1)} @ {m.group(2)}"
+            continue
+
+        if "APPLIED " in data or " APPLIED" in data:
+            completed.append({"kind": "applied", "name": _extract_after_label(data, "APPLIED"), "at": _extract_ts(data)})
+            stage_counts["applied"] += 1
+            current_action = None
+            continue
+        for label in ("EXPIRED", "CAPTCHA", "FAILED", "NO RESULT", "SSO", "LOGIN"):
+            if f" {label} " in data or data.endswith(label):
+                completed.append({"kind": "failed", "subkind": label.lower(), "name": _extract_after_label(data, label), "at": _extract_ts(data)})
+                stage_counts["failed"] += 1
+                current_action = None
+                break
+
+        m = _TAILORING_RE.search(data)
+        if m:
+            current_action = f"Tailoring {m.group(1)}/{m.group(2)}: {m.group(3)}"
+            continue
+        m = _SCORING_RE.search(data)
+        if m:
+            current_action = f"Scoring {m.group(1)}/{m.group(2)}: {m.group(3)}"
+            continue
+
+    # Drop very old completions; show only the newest N
+    completed_recent = completed[-recent_limit:][::-1]
+
+    elapsed_s = (time.time() - started_at) if started_at else None
+    return {
+        "running": running,
+        "stream_id": stream_id,
+        "kind": kind,
+        "started_at": started_at,
+        "elapsed_s": elapsed_s,
+        "current_stage": current_stage,
+        "current_action": current_action,
+        "completed": completed_recent,
+        "stage_counts": stage_counts,
+        "total_events": len(events),
+    }
+
+
+def _extract_ts(line: str) -> str | None:
+    """Pull HH:MM:SS off the front of a log line if present."""
+    m = _re.match(r"^(\d{2}:\d{2}:\d{2})", line)
+    return m.group(1) if m else None
+
+
+def _extract_after_label(line: str, label: str) -> str:
+    """Pull the trailing job title after an apply outcome label."""
+    idx = line.find(label)
+    if idx == -1:
+        return line.strip()[:80]
+    after = line[idx + len(label):].strip(" :()")
+    # Trim duration suffix and any worker tags
+    after = _re.sub(r"\(\d+s\):?\s*", "", after)
+    return after.strip()[:80]

@@ -3,7 +3,7 @@
 {% block breadcrumb %}Dashboard{% endblock %}
 
 {% block content %}
-<div x-data="dashboard()" x-init="load(); pollPipeline(); loadProcs(); pollProcs()" class="space-y-6">
+<div x-data="dashboard()" x-init="load(); pollPipeline(); pollProgress(); loadProcs(); pollProcs()" class="space-y-6">
 
   <!-- Pipeline control panel -->
   <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
@@ -88,6 +88,63 @@
           </div>
         </template>
         <div x-show="!costByDay.length" class="text-slate-500">no worker-*.log entries with total_cost_usd yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pipeline progress (only visible while pipeline is running OR has recent completions) -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4"
+       x-show="pipeline.running || (progress.completed && progress.completed.length)">
+    <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+      <div class="text-sm font-semibold">Pipeline progress</div>
+      <div class="flex gap-1 text-[10px] flex-wrap">
+        <template x-for="stage in stages" :key="stage">
+          <span class="px-2 py-0.5 rounded border whitespace-nowrap"
+                :class="progress.current_stage === stage
+                  ? 'bg-brand-500/30 border-brand-400 text-brand-400'
+                  : (stagesPassed.includes(stage)
+                    ? 'border-ink-700 text-emerald-400'
+                    : 'border-ink-700 text-slate-500')"
+                x-text="stage"></span>
+        </template>
+      </div>
+    </div>
+
+    <!-- Current action -->
+    <div class="bg-ink-900 border border-ink-700 rounded p-3 mb-3 min-h-[3.5rem]">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Currently</div>
+      <div class="flex items-center gap-2">
+        <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse" x-show="pipeline.running"></span>
+        <span class="text-sm" :class="pipeline.running ? 'text-slate-200' : 'text-slate-500'"
+              x-text="progress.current_action || (pipeline.running ? `${progress.current_stage || 'starting'}…` : 'idle')"></span>
+      </div>
+      <div class="text-xs text-slate-500 mt-1 flex flex-wrap gap-3" x-show="progress.stage_counts">
+        <span>tailored: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.tailored || 0"></span></span>
+        <span>cover letters: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.cover_letter || 0"></span></span>
+        <span>applied: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.applied || 0"></span></span>
+        <span>failed: <span class="text-rose-400 font-mono" x-text="progress.stage_counts?.failed || 0"></span></span>
+      </div>
+    </div>
+
+    <!-- Recent completions -->
+    <div x-show="progress.completed && progress.completed.length">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Recently completed</div>
+      <div class="space-y-1 max-h-64 overflow-auto pr-1">
+        <template x-for="(item, idx) in progress.completed" :key="idx + '-' + item.name">
+          <div class="flex items-center gap-2 text-xs py-1 border-b border-ink-700/40 last:border-0">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-mono whitespace-nowrap"
+                  :class="{
+                    'bg-emerald-700/30 text-emerald-300': item.kind === 'tailored',
+                    'bg-blue-700/30 text-blue-300': item.kind === 'cover_letter',
+                    'bg-brand-500/30 text-brand-400': item.kind === 'applied',
+                    'bg-rose-700/30 text-rose-300': item.kind === 'failed',
+                    'bg-amber-600/30 text-amber-300': item.kind === 'scored',
+                  }"
+                  x-text="item.subkind || item.kind.replace('_', ' ')"></span>
+            <span class="text-slate-300 truncate flex-1" x-text="item.name"></span>
+            <span class="text-slate-500 font-mono whitespace-nowrap" x-text="item.at || ''"></span>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -186,6 +243,19 @@
       pipeline: { running: false, rc: null, elapsed_s: 0, kind: null },
       pipelineError: '',
       startMode: 'chain',
+      progress: { current_stage: null, current_action: null, completed: [], stage_counts: {} },
+      stages: ['discover', 'enrich', 'score', 'tailor', 'cover', 'pdf', 'apply'],
+      get stagesPassed() {
+        if (!this.progress.current_stage) return [];
+        const idx = this.stages.indexOf(this.progress.current_stage);
+        return idx <= 0 ? [] : this.stages.slice(0, idx);
+      },
+      async pollProgress() {
+        try {
+          this.progress = await (await fetch('/api/pipeline/progress')).json();
+        } catch (_) {}
+        setTimeout(() => this.pollProgress(), 3000);
+      },
       procs: [],
       async loadProcs() {
         try {
