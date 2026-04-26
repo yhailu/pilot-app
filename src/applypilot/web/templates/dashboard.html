@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · ApplyPilot{% endblock %}
+{% block breadcrumb %}Dashboard{% endblock %}
+
+{% block content %}
+<div x-data="dashboard()" x-init="load(); pollPipeline()" class="space-y-6">
+
+  <!-- Pipeline control panel -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-3">
+        <div class="text-sm font-semibold">Pipeline</div>
+        <span class="text-xs px-2 py-0.5 rounded-full"
+              :class="pipeline.running ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40' : 'bg-ink-900 text-slate-500 border border-ink-700'"
+              x-text="pipeline.running ? '● running' : '○ idle'"></span>
+        <span class="text-xs text-slate-500" x-show="pipeline.running"
+              x-text="`elapsed ${Math.floor((pipeline.elapsed_s || 0) / 60)}m ${Math.floor((pipeline.elapsed_s || 0) % 60)}s · ${pipeline.kind || ''}`"></span>
+        <span class="text-xs text-slate-500" x-show="!pipeline.running && pipeline.rc !== null && pipeline.rc !== undefined"
+              x-text="`last exit code: ${pipeline.rc}`"></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <select x-model="startMode" class="bg-ink-900 border border-ink-700 rounded text-xs px-2 py-1"
+                :disabled="pipeline.running">
+          <option value="chain">chain (run + apply)</option>
+          <option value="run">run only</option>
+          <option value="apply">apply only</option>
+        </select>
+        <button @click="startPipeline()"
+                :disabled="pipeline.running"
+                class="text-xs px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ▶ Start
+        </button>
+        <button @click="stopPipeline()"
+                :disabled="!pipeline.running"
+                class="text-xs px-3 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ■ Stop
+        </button>
+      </div>
+    </div>
+    <div x-show="pipelineError" class="mt-2 text-xs text-rose-300" x-text="pipelineError"></div>
+  </div>
+
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <template x-for="card in cards" :key="card.label">
+      <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500" x-text="card.label"></div>
+        <div class="text-2xl font-semibold mt-1" x-text="card.value"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="card.hint"></div>
+      </div>
+    </template>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Score distribution</div>
+      <template x-for="row in scoreDist" :key="row.score">
+        <div class="flex items-center gap-2 text-xs my-1">
+          <span class="w-6 text-right" x-text="row.score"></span>
+          <div class="flex-1 h-2 bg-ink-900 rounded">
+            <div class="h-2 rounded" :style="`width:${row.pct}%; background:${row.color}`"></div>
+          </div>
+          <span class="w-10 text-slate-400 text-right" x-text="row.count"></span>
+        </div>
+      </template>
+      <div x-show="!scoreDist.length" class="text-xs text-slate-500">No scored jobs yet.</div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Jobs by source</div>
+      <template x-for="row in bySite" :key="row.site">
+        <div class="flex items-center justify-between text-xs py-1 border-b border-ink-700 last:border-0">
+          <span class="truncate" x-text="row.site || '?'"></span>
+          <span class="text-slate-400" x-text="row.count"></span>
+        </div>
+      </template>
+      <div x-show="!bySite.length" class="text-xs text-slate-500">No jobs yet.</div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Cost (worker logs)</div>
+      <div class="text-2xl font-semibold" x-text="'$' + costTotal.toFixed(4)"></div>
+      <div class="text-xs text-slate-500">total across all worker logs</div>
+      <div class="mt-3 space-y-1 text-xs">
+        <template x-for="bucket in costByDay.slice(0, 7)" :key="bucket.date">
+          <div class="flex justify-between">
+            <span x-text="bucket.date"></span>
+            <span class="text-slate-400" x-text="'$' + bucket.cost_usd.toFixed(4) + ' · ' + bucket.runs + ' runs'"></span>
+          </div>
+        </template>
+        <div x-show="!costByDay.length" class="text-slate-500">no worker-*.log entries with total_cost_usd yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-sm font-semibold">Live activity</div>
+      <div class="text-xs text-slate-500">tails newest run/chain/auto-loop/apply log</div>
+    </div>
+    <div class="bg-ink-900 border border-ink-700 rounded p-3 h-72 overflow-auto font-mono text-xs"
+         x-ref="activity"
+         hx-ext="sse"
+         sse-connect="/api/activity"
+         sse-swap="line,action"
+         hx-swap="beforeend">
+    </div>
+  </div>
+</div>
+
+<script>
+  function dashboard() {
+    return {
+      cards: [],
+      scoreDist: [],
+      bySite: [],
+      costTotal: 0,
+      costByDay: [],
+      pipeline: { running: false, rc: null, elapsed_s: 0, kind: null },
+      pipelineError: '',
+      startMode: 'chain',
+      async pollPipeline() {
+        try {
+          this.pipeline = await (await fetch('/api/pipeline/status')).json();
+        } catch (e) { /* ignore transient */ }
+        setTimeout(() => this.pollPipeline(), 5000);
+      },
+      async startPipeline() {
+        this.pipelineError = '';
+        try {
+          const resp = await fetch('/api/pipeline/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: this.startMode}),
+          });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            this.pipelineError = err.detail || ('start failed: ' + resp.status);
+          }
+          await this.pollPipeline();
+        } catch (e) { this.pipelineError = String(e); }
+      },
+      async stopPipeline() {
+        this.pipelineError = '';
+        try {
+          await fetch('/api/pipeline/stop', {method: 'POST'});
+          await this.pollPipeline();
+        } catch (e) { this.pipelineError = String(e); }
+      },
+      async load() {
+        const stats = await (await fetch('/api/stats')).json();
+        const cost  = await (await fetch('/api/cost')).json();
+        this.cards = [
+          { label: 'Total jobs',  value: stats.total,            hint: stats.with_description + ' enriched' },
+          { label: 'Scored',       value: stats.scored,           hint: stats.unscored + ' pending' },
+          { label: 'Tailored',     value: stats.tailored,         hint: stats.untailored_eligible + ' eligible' },
+          { label: 'Applied',      value: stats.applied,          hint: stats.apply_errors + ' errors' },
+        ];
+        const max = Math.max(1, ...stats.score_distribution.map(r => r[1]));
+        this.scoreDist = stats.score_distribution.map(([s, c]) => ({
+          score: s,
+          count: c,
+          pct: Math.round(c / max * 100),
+          color: s >= 7 ? '#10b981' : s >= 5 ? '#f59e0b' : '#ef4444',
+        }));
+        this.bySite   = stats.by_site.map(([site, count]) => ({ site, count }));
+        this.costTotal = cost.total_usd;
+        this.costByDay = cost.by_day;
+      }
+    };
+  }
+</script>
+{% endblock %}

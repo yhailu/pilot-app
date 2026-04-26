@@ -360,6 +360,29 @@ def dashboard() -> None:
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (loopback by default)."),
+    port: int = typer.Option(8765, "--port", help="TCP port for the web UI."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev)."),
+) -> None:
+    """Launch the ApplyPilot web UI."""
+    _bootstrap()
+
+    # Import lazily so `applypilot --help` doesn't pull FastAPI in when the
+    # optional [web] extras aren't installed.
+    try:
+        from applypilot.web.server import run_server
+    except ImportError:
+        console.print(
+            "[red]Web extras not installed.[/red] Run: "
+            "pip install -e \".[web]\""
+        )
+        raise typer.Exit(1)
+
+    run_server(host=host, port=port, reload=reload)
+
+
+@app.command()
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil

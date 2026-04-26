@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}ApplyPilot{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: { 900: '#0f172a', 800: '#1e293b', 700: '#334155' },
+            brand: { 400: '#60a5fa', 500: '#3b82f6' },
+            ok:   '#10b981',
+            warn: '#f59e0b',
+            bad:  '#ef4444',
+          },
+          fontFamily: {
+            sans: ['system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <script defer src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script defer src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.13.10/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body class="bg-ink-900 text-slate-200 font-sans min-h-screen">
+  <div class="flex min-h-screen">
+    <aside class="w-56 bg-ink-800 border-r border-ink-700 flex flex-col">
+      <div class="p-4 border-b border-ink-700">
+        <a href="/dashboard" class="text-lg font-semibold text-brand-400">ApplyPilot</a>
+        <div class="text-xs text-slate-500">local web UI</div>
+      </div>
+      <nav class="flex-1 p-2 space-y-1 text-sm">
+        <a href="/dashboard" class="block px-3 py-2 rounded hover:bg-ink-700">Dashboard</a>
+        <a href="/jobs" class="block px-3 py-2 rounded hover:bg-ink-700">Jobs</a>
+        <a href="/settings" class="block px-3 py-2 rounded hover:bg-ink-700">Settings</a>
+      </nav>
+      <div class="p-3 border-t border-ink-700 text-xs text-slate-500">
+        v0.3.0 &middot; localhost
+      </div>
+    </aside>
+    <main class="flex-1 flex flex-col">
+      <header class="bg-ink-800 border-b border-ink-700 px-6 py-3 flex items-center justify-between">
+        <div class="text-sm text-slate-400">{% block breadcrumb %}{% endblock %}</div>
+        <div class="flex items-center gap-3 text-xs" x-data="topBar()">
+          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700" x-text="'model: ' + (currentModel || '—')"></span>
+          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700" x-text="'today: $' + costToday.toFixed(4)"></span>
+          {% if loop_active %}
+          <span class="px-2 py-1 rounded bg-ok/20 border border-ok text-ok flex items-center gap-1">
+            <span class="w-1.5 h-1.5 rounded-full bg-ok animate-pulse"></span>
+            auto-loop active
+          </span>
+          {% endif %}
+        </div>
+      </header>
+      <section class="flex-1 p-6">
+        {% block content %}{% endblock %}
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

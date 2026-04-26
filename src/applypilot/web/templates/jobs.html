@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Jobs · ApplyPilot{% endblock %}
+{% block breadcrumb %}<a href="/dashboard" class="hover:text-slate-200">Dashboard</a> / Jobs{% endblock %}
+
+{% block content %}
+<div x-data="jobsPage()" x-init="loadSites(); load()">
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 mb-4 sticky top-0 z-10">
+    <div class="flex flex-wrap items-center gap-2 text-xs">
+      <template x-for="opt in statusPills" :key="opt.value">
+        <button class="px-2 py-1 rounded border"
+                :class="filters.status === opt.value
+                  ? 'bg-brand-500/30 border-brand-400 text-brand-400'
+                  : 'border-ink-700 hover:border-brand-400'"
+                @click="filters.status = (filters.status === opt.value ? null : opt.value); load()"
+                x-text="opt.label"></button>
+      </template>
+
+      <select x-model="filters.site" @change="load()" class="bg-ink-900 border border-ink-700 rounded px-2 py-1">
+        <option :value="null">All sites</option>
+        <template x-for="s in sites" :key="s.site">
+          <option :value="s.site" x-text="`${s.site} (${s.count})`"></option>
+        </template>
+      </select>
+
+      <label class="flex items-center gap-1">min
+        <input type="number" min="0" max="10" x-model.number="filters.min_score" @change="load()"
+               class="w-12 bg-ink-900 border border-ink-700 rounded px-1 py-1 text-center">
+      </label>
+      <label class="flex items-center gap-1">max
+        <input type="number" min="0" max="10" x-model.number="filters.max_score" @change="load()"
+               class="w-12 bg-ink-900 border border-ink-700 rounded px-1 py-1 text-center">
+      </label>
+
+      <input type="search" placeholder="search title or description"
+             x-model.debounce.400ms="filters.q" @input="load()"
+             class="flex-1 min-w-[12rem] bg-ink-900 border border-ink-700 rounded px-2 py-1">
+
+      <span class="text-slate-500 ml-auto" x-text="`${total} matches`"></span>
+    </div>
+  </div>
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-ink-900 text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('fit_score')">Score</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('title')">Title</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('site')">Site</th>
+          <th class="text-left px-3 py-2">Location</th>
+          <th class="text-left px-3 py-2">Status</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('discovered_at')">Discovered</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="row in items" :key="row.url">
+          <tr class="border-t border-ink-700 hover:bg-ink-700/40">
+            <td class="px-3 py-2">
+              <span class="px-1.5 py-0.5 rounded text-xs font-mono"
+                    :class="scoreClass(row.fit_score)"
+                    x-text="row.fit_score ?? '—'"></span>
+            </td>
+            <td class="px-3 py-2">
+              <a class="text-brand-400 hover:underline" :href="`/jobs/${encodeURIComponent(row.url)}`" x-text="row.title || '(untitled)'"></a>
+              <div class="text-xs text-slate-500" x-show="row.salary" x-text="row.salary"></div>
+            </td>
+            <td class="px-3 py-2 text-slate-300" x-text="row.site"></td>
+            <td class="px-3 py-2 text-slate-400" x-text="row.location || '—'"></td>
+            <td class="px-3 py-2">
+              <span class="text-xs" x-text="statusLabel(row)"></span>
+            </td>
+            <td class="px-3 py-2 text-xs text-slate-500" x-text="(row.discovered_at || '').slice(0, 16).replace('T', ' ')"></td>
+          </tr>
+        </template>
+        <tr x-show="!items.length">
+          <td colspan="6" class="text-center text-slate-500 px-3 py-6">No jobs match the current filters.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="flex items-center justify-between mt-3 text-xs text-slate-500">
+    <button class="px-3 py-1 rounded border border-ink-700 disabled:opacity-40"
+            :disabled="offset === 0"
+            @click="offset = Math.max(0, offset - limit); load()">Previous</button>
+    <span x-text="`page ${Math.floor(offset / limit) + 1} of ${Math.max(1, Math.ceil(total / limit))}`"></span>
+    <button class="px-3 py-1 rounded border border-ink-700 disabled:opacity-40"
+            :disabled="offset + limit >= total"
+            @click="offset += limit; load()">Next</button>
+  </div>
+</div>
+
+<script>
+  function jobsPage() {
+    return {
+      items: [],
+      sites: [],
+      total: 0,
+      offset: 0,
+      limit: 50,
+      sort: 'discovered_at',
+      direction: 'desc',
+      filters: { status: null, site: null, min_score: null, max_score: null, q: '' },
+      statusPills: [
+        { value: 'pending',  label: 'Pending' },
+        { value: 'scored',   label: 'Scored' },
+        { value: 'tailored', label: 'Tailored' },
+        { value: 'ready',    label: 'Ready to apply' },
+        { value: 'applied',  label: 'Applied' },
+        { value: 'failed',   label: 'Failed' },
+      ],
+      async loadSites() {
+        try { this.sites = await (await fetch('/api/sites')).json(); } catch (_) { this.sites = []; }
+      },
+      sortBy(col) {
+        if (this.sort === col) {
+          this.direction = this.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+          this.sort = col;
+          this.direction = 'desc';
+        }
+        this.load();
+      },
+      async load() {
+        const p = new URLSearchParams();
+        p.set('limit', this.limit);
+        p.set('offset', this.offset);
+        p.set('sort', this.sort);
+        p.set('direction', this.direction);
+        for (const k of ['status', 'site', 'q']) {
+          if (this.filters[k]) p.set(k, this.filters[k]);
+        }
+        if (this.filters.min_score !== null && this.filters.min_score !== '') p.set('min_score', this.filters.min_score);
+        if (this.filters.max_score !== null && this.filters.max_score !== '') p.set('max_score', this.filters.max_score);
+        const data = await (await fetch('/api/jobs?' + p.toString())).json();
+        this.items = data.items;
+        this.total = data.total;
+      },
+      scoreClass(s) {
+        if (s == null) return 'bg-ink-900 text-slate-500';
+        if (s >= 7) return 'bg-ok/20 text-ok';
+        if (s >= 5) return 'bg-warn/20 text-warn';
+        return 'bg-bad/20 text-bad';
+      },
+      statusLabel(row) {
+        if (row.applied_at) return 'applied';
+        if (row.apply_status === 'failed') return 'failed: ' + (row.apply_error || '?');
+        if (row.tailored_resume_path) return 'tailored';
+        if (row.fit_score != null) return 'scored';
+        return 'pending';
+      }
+    };
+  }
+</script>
+{% endblock %}

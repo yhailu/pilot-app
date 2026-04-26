@@ -1,0 +1,28 @@
+{# HTMX-swappable single row for the jobs table.
+   Used when the page wants to replace one row in place after a mark/retailor
+   without reloading the whole list. #}
+<tr class="border-t border-ink-700 hover:bg-ink-700/40" id="job-row-{{ job.url | urlencode }}">
+  <td class="px-3 py-2">
+    {% if job.fit_score is not none %}
+    <span class="px-1.5 py-0.5 rounded text-xs font-mono
+      {% if job.fit_score >= 7 %}bg-ok/20 text-ok
+      {% elif job.fit_score >= 5 %}bg-warn/20 text-warn
+      {% else %}bg-bad/20 text-bad{% endif %}">{{ job.fit_score }}</span>
+    {% else %}<span class="text-slate-500">—</span>{% endif %}
+  </td>
+  <td class="px-3 py-2">
+    <a class="text-brand-400 hover:underline"
+       href="/jobs/{{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a>
+    {% if job.salary %}<div class="text-xs text-slate-500">{{ job.salary }}</div>{% endif %}
+  </td>
+  <td class="px-3 py-2 text-slate-300">{{ job.site }}</td>
+  <td class="px-3 py-2 text-slate-400">{{ job.location or "—" }}</td>
+  <td class="px-3 py-2 text-xs">
+    {% if job.applied_at %}<span class="text-ok">applied</span>
+    {% elif job.apply_status == 'failed' %}<span class="text-bad">failed</span>
+    {% elif job.tailored_resume_path %}<span class="text-brand-400">tailored</span>
+    {% elif job.fit_score is not none %}<span class="text-warn">scored</span>
+    {% else %}<span class="text-slate-500">pending</span>{% endif %}
+  </td>
+  <td class="px-3 py-2 text-xs text-slate-500">{{ (job.discovered_at or '')[:16].replace('T', ' ') }}</td>
+</tr>

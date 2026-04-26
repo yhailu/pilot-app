@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title or "Job" }} · ApplyPilot{% endblock %}
+{% block breadcrumb %}<a href="/jobs" class="hover:text-slate-200">Jobs</a> / {{ job.title or job.url }}{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6"
+     x-data='jobDetail({{ {"url": job.url}|tojson }})'
+     x-init="loadCurrentModel()">
+
+  <div class="space-y-4">
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="flex items-start justify-between gap-2">
+        <div>
+          <h1 class="text-lg font-semibold text-slate-100">{{ job.title or "(untitled)" }}</h1>
+          <div class="text-sm text-slate-400">{{ job.site }} {% if job.location %}· {{ job.location }}{% endif %}</div>
+          {% if job.salary %}<div class="text-xs text-slate-500 mt-1">{{ job.salary }}</div>{% endif %}
+          <div class="text-xs text-slate-500 mt-2">
+            <a href="{{ job.url }}" target="_blank" class="text-brand-400 hover:underline break-all">{{ job.url }}</a>
+          </div>
+          {% if job.application_url and job.application_url != job.url %}
+          <div class="text-xs text-slate-500 mt-1">
+            apply: <a href="{{ job.application_url }}" target="_blank" class="text-brand-400 hover:underline break-all">{{ job.application_url }}</a>
+          </div>
+          {% endif %}
+        </div>
+        {% if job.fit_score is not none %}
+        <span class="px-2 py-1 rounded font-mono text-sm
+          {% if job.fit_score >= 7 %}bg-ok/20 text-ok
+          {% elif job.fit_score >= 5 %}bg-warn/20 text-warn
+          {% else %}bg-bad/20 text-bad{% endif %}">
+          {{ job.fit_score }}/10
+        </span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-2">Job description</div>
+      <div class="text-sm text-slate-300 whitespace-pre-wrap leading-relaxed max-h-[60vh] overflow-auto">{{ job.full_description or job.description or "(no description scraped)" }}</div>
+    </div>
+
+    {% if job.score_reasoning %}
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-2">Score reasoning</div>
+      <div class="text-sm text-slate-300 whitespace-pre-wrap">{{ job.score_reasoning }}</div>
+    </div>
+    {% endif %}
+
+    {% if report %}
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-2">Validation report</div>
+      <pre class="text-xs text-slate-300 whitespace-pre-wrap">{{ report | tojson(indent=2) }}</pre>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="space-y-4">
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold">Actions</div>
+        <div class="text-xs text-slate-500" x-text="'model: ' + (currentModel || '—')"></div>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button class="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-400 text-white text-sm"
+                @click="retailor()" :disabled="busy">Re-tailor (live stream)</button>
+        <button class="px-3 py-1.5 rounded border border-ink-700 hover:border-brand-400 text-sm"
+                @click="reapply()" :disabled="busy">Re-apply</button>
+        <button class="px-3 py-1.5 rounded border border-ink-700 hover:border-ok text-sm"
+                @click="mark('applied')" :disabled="busy">Mark applied</button>
+        <button class="px-3 py-1.5 rounded border border-ink-700 hover:border-bad text-sm"
+                @click="mark('failed')" :disabled="busy">Mark failed</button>
+        <button class="px-3 py-1.5 rounded border border-ink-700 hover:border-warn text-sm"
+                @click="mark('reset')" :disabled="busy">Reset</button>
+      </div>
+      <div x-show="actionMsg" class="mt-2 text-xs text-slate-400" x-text="actionMsg"></div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold">Tailored resume</div>
+        {% if job.tailored_resume_path %}
+        <a class="text-xs text-brand-400 hover:underline"
+           href="/api/files/resume/{{ job.url | urlencode }}" target="_blank">open file</a>
+        {% endif %}
+      </div>
+      <textarea readonly class="w-full h-64 bg-ink-900 border border-ink-700 rounded p-2 font-mono text-xs leading-snug"
+                placeholder="No tailored resume yet. Click Re-tailor to generate one.">{{ tailored_text }}</textarea>
+    </div>
+
+    {% if cover_text %}
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-2">Cover letter</div>
+      <textarea readonly class="w-full h-40 bg-ink-900 border border-ink-700 rounded p-2 font-mono text-xs leading-snug">{{ cover_text }}</textarea>
+    </div>
+    {% endif %}
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 fixed bottom-4 right-4 w-[28rem] max-w-[90vw] shadow-xl"
+         x-show="streamId" x-transition>
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-sm font-semibold">
+          Live AI <span class="text-xs text-slate-500" x-text="'(' + streamKind + ')'"></span>
+        </div>
+        <button @click="closeStream()" class="text-xs text-slate-400 hover:text-slate-200">close</button>
+      </div>
+      <div x-ref="livePane" class="bg-ink-900 border border-ink-700 rounded p-2 h-56 overflow-auto font-mono text-xs whitespace-pre-wrap"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function jobDetail(meta) {
+    return {
+      url: meta.url,
+      busy: false,
+      currentModel: '',
+      actionMsg: '',
+      streamId: null,
+      streamKind: '',
+      _es: null,
+      async loadCurrentModel() {
+        try {
+          const m = await (await fetch('/api/models')).json();
+          this.currentModel = m.current || '(default)';
+        } catch (_) {}
+      },
+      async mark(status) {
+        this.busy = true;
+        try {
+          const reason = status === 'failed' ? (prompt('Reason?') || 'manual') : null;
+          await fetch('/api/jobs/' + encodeURIComponent(this.url) + '/mark', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ status, reason }),
+          });
+          this.actionMsg = 'marked: ' + status;
+        } finally { this.busy = false; }
+      },
+      async retailor() { await this._spawn('retailor', 'tailor'); },
+      async reapply()  { await this._spawn('reapply',  'apply'); },
+      async _spawn(endpoint, kind) {
+        this.busy = true;
+        try {
+          const res = await fetch('/api/jobs/' + encodeURIComponent(this.url) + '/' + endpoint, { method: 'POST' });
+          if (!res.ok) {
+            this.actionMsg = 'failed to start: ' + res.status;
+            return;
+          }
+          const data = await res.json();
+          this.streamId = data.stream_id;
+          this.streamKind = kind;
+          this.$refs.livePane.textContent = '';
+          this._connect(data.stream_id);
+        } finally { this.busy = false; }
+      },
+      _connect(id) {
+        if (this._es) this._es.close();
+        const es = new EventSource('/api/streams/' + id);
+        this._es = es;
+        es.addEventListener('line', (e) => this._append(e.data));
+        es.addEventListener('action', (e) => this._append(e.data));
+        es.addEventListener('done', (e) => { this._append('-- done -- ' + e.data); es.close(); });
+        es.onerror = () => { this._append('-- stream closed --'); es.close(); };
+      },
+      _append(text) {
+        const pane = this.$refs.livePane;
+        pane.textContent += (text + '\n');
+        pane.scrollTop = pane.scrollHeight;
+      },
+      closeStream() {
+        if (this._es) { this._es.close(); this._es = null; }
+        this.streamId = null;
+      }
+    };
+  }
+</script>
+{% endblock %}
