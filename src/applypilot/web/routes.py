@@ -328,9 +328,15 @@ def register_routes(app: FastAPI, *, templates_dir: Path) -> None:
 
     @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
     async def settings_page(request: Request):
+        # Convert the Pydantic model to a plain dict before passing to Jinja —
+        # the `| tojson` filter uses json.dumps, which can't serialize Pydantic.
         return templates.TemplateResponse(
             "settings.html",
-            {"request": request, "models": _models_payload(), "loop_active": _is_loop_active()},
+            {
+                "request": request,
+                "models": _models_payload().model_dump(),
+                "loop_active": _is_loop_active(),
+            },
         )
 
     # --- Read API ---
