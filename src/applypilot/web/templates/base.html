@@ -29,14 +29,22 @@
   <script defer src="https://unpkg.com/alpinejs@3.13.10/dist/cdn.min.js"></script>
   <link rel="stylesheet" href="/static/app.css" />
 </head>
-<body class="bg-ink-900 text-slate-200 font-sans min-h-screen">
+<body class="bg-ink-900 text-slate-200 font-sans min-h-screen" x-data="{ navOpen: false }">
+  <!-- Mobile drawer backdrop -->
+  <div x-show="navOpen" @click="navOpen = false" x-transition.opacity
+       class="fixed inset-0 bg-black/60 z-30 md:hidden" style="display: none;"></div>
+
   <div class="flex min-h-screen">
-    <aside class="w-56 bg-ink-800 border-r border-ink-700 flex flex-col">
-      <div class="p-4 border-b border-ink-700">
-        <a href="/dashboard" class="text-lg font-semibold text-brand-400">ApplyPilot</a>
-        <div class="text-xs text-slate-500">local web UI</div>
+    <aside class="fixed inset-y-0 left-0 z-40 w-56 bg-ink-800 border-r border-ink-700 flex flex-col transform transition-transform md:relative md:translate-x-0"
+           :class="navOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'">
+      <div class="p-4 border-b border-ink-700 flex items-center justify-between">
+        <div>
+          <a href="/dashboard" class="text-lg font-semibold text-brand-400">ApplyPilot</a>
+          <div class="text-xs text-slate-500">local web UI</div>
+        </div>
+        <button @click="navOpen = false" class="md:hidden text-slate-400 hover:text-slate-200 text-xl leading-none" aria-label="Close menu">×</button>
       </div>
-      <nav class="flex-1 p-2 space-y-1 text-sm">
+      <nav class="flex-1 p-2 space-y-1 text-sm" @click="navOpen = false">
         <a href="/dashboard" class="block px-3 py-2 rounded hover:bg-ink-700">Dashboard</a>
         <a href="/jobs" class="block px-3 py-2 rounded hover:bg-ink-700">Jobs</a>
         <a href="/settings" class="block px-3 py-2 rounded hover:bg-ink-700">Settings</a>
@@ -45,21 +53,24 @@
         v0.3.0 &middot; localhost
       </div>
     </aside>
-    <main class="flex-1 flex flex-col">
-      <header class="bg-ink-800 border-b border-ink-700 px-6 py-3 flex items-center justify-between">
-        <div class="text-sm text-slate-400">{% block breadcrumb %}{% endblock %}</div>
-        <div class="flex items-center gap-3 text-xs" x-data="topBar()">
-          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700" x-text="'model: ' + (currentModel || '—')"></span>
-          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700" x-text="'today: $' + costToday.toFixed(4)"></span>
+    <main class="flex-1 flex flex-col min-w-0 md:ml-0">
+      <header class="bg-ink-800 border-b border-ink-700 px-4 sm:px-6 py-3 flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-3 min-w-0">
+          <button @click="navOpen = true" class="md:hidden text-slate-300 hover:text-brand-400 text-xl leading-none" aria-label="Open menu">☰</button>
+          <div class="text-sm text-slate-400 truncate">{% block breadcrumb %}{% endblock %}</div>
+        </div>
+        <div class="flex items-center gap-2 text-xs flex-wrap" x-data="topBar()">
+          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700 whitespace-nowrap" x-text="'model: ' + (currentModel || '—')"></span>
+          <span class="px-2 py-1 rounded bg-ink-900 border border-ink-700 whitespace-nowrap" x-text="'today: $' + costToday.toFixed(4)"></span>
           {% if loop_active %}
-          <span class="px-2 py-1 rounded bg-ok/20 border border-ok text-ok flex items-center gap-1">
+          <span class="px-2 py-1 rounded bg-ok/20 border border-ok text-ok flex items-center gap-1 whitespace-nowrap">
             <span class="w-1.5 h-1.5 rounded-full bg-ok animate-pulse"></span>
             auto-loop active
           </span>
           {% endif %}
         </div>
       </header>
-      <section class="flex-1 p-6">
+      <section class="flex-1 p-4 sm:p-6 min-w-0">
         {% block content %}{% endblock %}
       </section>
     </main>

@@ -57,3 +57,24 @@ select:focus, input:focus, textarea:focus {
   50%      { opacity: 0.55; }
 }
 .animate-pulse { animation: ap-pulse 1.6s ease-in-out infinite; }
+
+/* ── Mobile / iOS-Safari quirks ───────────────────────────────────────────── */
+
+/* Stop iOS from auto-zooming inputs when font-size is smaller than 16px. */
+@media (max-width: 767px) {
+  input, select, textarea, button { font-size: 16px; }
+}
+
+/* Suppress the gray tap-highlight rectangle on links/buttons on iOS. */
+* { -webkit-tap-highlight-color: transparent; }
+
+/* Smooth momentum scrolling for overflow-auto panes inside cards on iOS. */
+.overflow-auto, [class*="overflow-x-auto"], [class*="overflow-y-auto"] {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Long URLs / cmdlines on the dashboard process panel must wrap at narrow
+   widths instead of triggering horizontal page scroll. */
+@media (max-width: 767px) {
+  .break-anywhere, td, th { word-break: break-word; }
+}

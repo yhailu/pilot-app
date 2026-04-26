@@ -5,8 +5,23 @@
 {% block content %}
 <div x-data="jobsPage()" x-init="loadSites(); load()">
 
-  <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 mb-4 sticky top-0 z-10">
-    <div class="flex flex-wrap items-center gap-2 text-xs">
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 mb-4 sticky top-0 z-10" x-data="{ filtersOpen: false }">
+    <!-- Mobile: collapsed filter trigger -->
+    <div class="md:hidden flex items-center gap-2 text-xs">
+      <input type="search" placeholder="search title or description"
+             x-model.debounce.400ms="filters.q" @input="load()"
+             class="flex-1 bg-ink-900 border border-ink-700 rounded px-2 py-2">
+      <button @click="filtersOpen = !filtersOpen"
+              class="px-3 py-2 rounded border border-ink-700 whitespace-nowrap"
+              :class="filtersOpen ? 'bg-brand-500/30 border-brand-400 text-brand-400' : ''">
+        <span x-text="filtersOpen ? '× Hide' : '⛭ Filters'"></span>
+      </button>
+      <span class="text-slate-500 whitespace-nowrap" x-text="`${total} matches`"></span>
+    </div>
+
+    <!-- Desktop + expanded mobile: full filter bar -->
+    <div class="flex flex-wrap items-center gap-2 text-xs"
+         :class="{ 'hidden md:flex': !filtersOpen, 'flex mt-3 md:mt-0': filtersOpen }">
       <template x-for="opt in statusPills" :key="opt.value">
         <button class="px-2 py-1 rounded border"
                 :class="filters.status === opt.value
@@ -34,13 +49,51 @@
 
       <input type="search" placeholder="search title or description"
              x-model.debounce.400ms="filters.q" @input="load()"
-             class="flex-1 min-w-[12rem] bg-ink-900 border border-ink-700 rounded px-2 py-1">
+             class="hidden md:block flex-1 min-w-[12rem] bg-ink-900 border border-ink-700 rounded px-2 py-1">
 
-      <span class="text-slate-500 ml-auto" x-text="`${total} matches`"></span>
+      <span class="hidden md:inline text-slate-500 ml-auto" x-text="`${total} matches`"></span>
     </div>
   </div>
 
-  <div class="bg-ink-800 border border-ink-700 rounded-lg overflow-hidden">
+  <!-- Mobile: stacked card view -->
+  <div class="md:hidden space-y-2">
+    <template x-for="row in items" :key="row.url">
+      <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 relative">
+        <span class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-xs font-mono"
+              :class="scoreClass(row.fit_score)"
+              x-text="row.fit_score ?? '—'"></span>
+        <a class="block text-sm font-medium text-brand-400 hover:underline pr-10"
+           :href="`/jobs/${encodeURIComponent(row.url)}`"
+           x-text="row.title || '(untitled)'"></a>
+        <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          <span x-text="row.site"></span>
+          <span x-show="row.location" x-text="row.location"></span>
+          <span class="text-slate-500" x-text="(row.discovered_at || '').slice(0, 10)"></span>
+        </div>
+        <div class="text-xs mt-1 flex items-center justify-between gap-2 flex-wrap">
+          <span x-text="statusLabel(row)"></span>
+          <button class="text-xs px-3 py-1.5 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="tailorState[row.url]?.status === 'running'"
+                  @click="retailor(row)"
+                  x-text="row.tailored_resume_path ? '↻ Re-tailor' : '✎ Tailor'"></button>
+        </div>
+        <!-- Inline tailor progress -->
+        <div x-show="tailorState[row.url]" class="mt-1 text-[11px]">
+          <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse mr-1" x-show="tailorState[row.url]?.status === 'running'"></span>
+          <span :class="tailorState[row.url]?.status === 'done'
+                        ? (tailorState[row.url]?.rc === 0 ? 'text-emerald-400' : 'text-rose-400')
+                        : 'text-slate-400'"
+                x-text="tailorState[row.url]?.message"></span>
+        </div>
+      </div>
+    </template>
+    <div x-show="!items.length" class="text-center text-slate-500 px-3 py-6">
+      No jobs match the current filters.
+    </div>
+  </div>
+
+  <!-- Desktop: table view -->
+  <div class="hidden md:block bg-ink-800 border border-ink-700 rounded-lg overflow-hidden">
     <table class="w-full text-sm">
       <thead class="bg-ink-900 text-xs uppercase tracking-wide text-slate-500">
         <tr>
