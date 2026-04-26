@@ -126,6 +126,16 @@
       </div>
     </div>
 
+    <!-- Live tail of meaningful log lines (always visible while running) -->
+    <div x-show="progress.recent_activity && progress.recent_activity.length" class="mb-3">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Live tail</div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2 max-h-40 overflow-auto font-mono text-[11px] leading-relaxed">
+        <template x-for="(line, idx) in progress.recent_activity" :key="idx + line">
+          <div class="text-slate-300 whitespace-pre-wrap break-words" x-text="line"></div>
+        </template>
+      </div>
+    </div>
+
     <!-- Recent completions -->
     <div x-show="progress.completed && progress.completed.length">
       <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Recently completed</div>

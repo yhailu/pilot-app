@@ -396,6 +396,59 @@ _APPLY_DONE_RE = _re.compile(r"\[W\d+\]\s+(APPLIED|EXPIRED|CAPTCHA|FAILED|NO RES
 _TAILORING_RE = _re.compile(r"Tailoring\s+(\d+)/(\d+)[:\s]\s*(.+)$", _re.IGNORECASE)
 _SCORING_RE = _re.compile(r"Scoring\s+(\d+)/(\d+)[:\s]\s*(.+)$", _re.IGNORECASE)
 
+# Per-stage activity hints — pulled from real log line shapes.
+_STAGE_HINTS = (
+    # discover
+    (_re.compile(r"\[([^\]]+)\]\s+Done:\s+(\d+)\s+found,\s+(\d+)\s+new"),
+     lambda m: f"Discover [{m.group(1)}]: found {m.group(2)}, {m.group(3)} new"),
+    (_re.compile(r"^([\w\s.&/'-]+):\s+searching\s+\"([^\"]+)\""),
+     lambda m: f"Searching {m.group(1).strip()}: \"{m.group(2)}\""),
+    (_re.compile(r"^([\w\s.&/'-]+):\s+(\d+)\s+total results"),
+     lambda m: f"{m.group(1).strip()}: {m.group(2)} total results"),
+    (_re.compile(r"^([\w\s.&/'-]+):\s+(\d+)\s+jobs found"),
+     lambda m: f"{m.group(1).strip()}: {m.group(2)} jobs matched filter"),
+    (_re.compile(r"JobRight:\s+found\s+(\d+)\s+cards"),
+     lambda m: f"JobRight: scraped {m.group(1)} cards"),
+    (_re.compile(r"JobRight new:\s+(.+)$"),
+     lambda m: f"JobRight: + {m.group(1)}"),
+    (_re.compile(r"JobRight scrape complete:\s+(.+)$"),
+     lambda m: f"JobRight done — {m.group(1)}"),
+    (_re.compile(r"Full crawl:\s+(\d+)\s+search combinations"),
+     lambda m: f"JobSpy: starting full crawl, {m.group(1)} search combinations"),
+    (_re.compile(r"Sites:\s+(.+?)\s+\|"),
+     lambda m: f"JobSpy: querying {m.group(1)}"),
+    (_re.compile(r"Smart-extract:\s+(.+?)$"),
+     lambda m: f"Smart-extract: {m.group(1)}"),
+    # enrich
+    (_re.compile(r"Enriching\s+(\d+)/(\d+):\s*(.+)$"),
+     lambda m: f"Enrich {m.group(1)}/{m.group(2)}: {m.group(3)}"),
+    (_re.compile(r"detail\.py.*Fetched\s+(.+?)\s"),
+     lambda m: f"Enrich: fetched {m.group(1)}"),
+    # score
+    (_re.compile(r"Scored:\s+(\d+)\s+jobs"),
+     lambda m: f"Score: {m.group(1)} jobs scored"),
+    (_re.compile(r"Done:\s+(\d+)\s+scored in"),
+     lambda m: f"Score: {m.group(1)} jobs scored, stage complete"),
+    # general subprocess starts
+    (_re.compile(r"^\s*Started thread:\s+(\w+)"),
+     lambda m: f"Started thread: {m.group(1)}"),
+    (_re.compile(r"^\s*JobSpy full crawl"),
+     lambda m: "JobSpy: launching full crawl…"),
+    (_re.compile(r"\bChrome started on port (\d+).*pid (\d+)"),
+     lambda m: f"Chrome worker started on port {m.group(1)} (pid {m.group(2)})"),
+)
+
+# Lines we consider noise — don't show these as activity / don't include in tail.
+_NOISE_RE = _re.compile(
+    r"^\s*$"                                   # blank
+    r"|^\s*[┌└│├─=+|—-]+\s*$"                 # box-drawing / horizontal rules
+    r"|^\s*\|.*\|\s*$"                         # table rows of just pipes
+    r"|HTTP Request:"                          # litellm chatter
+    r"|LiteLLM:"                               # internal noise
+    r"|^[0-9:]{8}\s+-\s+INFO\s+-\s+selected\s+model\s+name"
+    r"|^[0-9:]{8}\s+-\s+INFO\s+-\s+HTTP/"
+)
+
 
 def _pretty_from_pdf_path(path: str) -> dict:
     """Extract a readable {kind, name} from a PDF generated path."""
@@ -465,18 +518,25 @@ def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
     current_action = None
     completed: list[dict] = []
     stage_counts = {"tailored": 0, "cover_letter": 0, "applied": 0, "failed": 0, "scored": 0}
+    recent_lines: list[str] = []  # last N non-noise log lines for the live tail
 
     for i, evt in enumerate(events):
         data = evt.get("data") or ""
         if not data:
             continue
+        # Strip "HH:MM:SS - INFO - " or similar prefix for the tail display
+        clean = _re.sub(r"^[0-9:]{8}\s+-\s+\w+\s+-\s+", "", data).strip()
+
+        if not _NOISE_RE.search(clean):
+            recent_lines.append(clean)
+            if len(recent_lines) > 25:
+                recent_lines = recent_lines[-25:]
 
         m = _STAGE_RE.search(data)
         if m:
             current_stage = m.group(1).lower()
             stage_started_idx = i
-            # Reset current action when stage flips
-            current_action = None
+            current_action = f"Entering stage: {current_stage}"
             continue
 
         m = _PDF_RE.search(data)
@@ -484,7 +544,7 @@ def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
             info = _pretty_from_pdf_path(m.group(1))
             completed.append({**info, "at": _extract_ts(data)})
             stage_counts[info["kind"]] = stage_counts.get(info["kind"], 0) + 1
-            current_action = None
+            current_action = f"Generated: {info['name']}"
             continue
 
         m = _APPLY_START_RE.search(data)
@@ -497,12 +557,16 @@ def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
             stage_counts["applied"] += 1
             current_action = None
             continue
+        outcome_hit = False
         for label in ("EXPIRED", "CAPTCHA", "FAILED", "NO RESULT", "SSO", "LOGIN"):
             if f" {label} " in data or data.endswith(label):
                 completed.append({"kind": "failed", "subkind": label.lower(), "name": _extract_after_label(data, label), "at": _extract_ts(data)})
                 stage_counts["failed"] += 1
                 current_action = None
+                outcome_hit = True
                 break
+        if outcome_hit:
+            continue
 
         m = _TAILORING_RE.search(data)
         if m:
@@ -513,10 +577,22 @@ def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
             current_action = f"Scoring {m.group(1)}/{m.group(2)}: {m.group(3)}"
             continue
 
+        # General per-stage activity hints — fills the gap during discover/score/etc.
+        for pattern, formatter in _STAGE_HINTS:
+            mm = pattern.search(clean)
+            if mm:
+                current_action = formatter(mm)
+                break
+
     # Drop very old completions; show only the newest N
     completed_recent = completed[-recent_limit:][::-1]
 
     elapsed_s = (time.time() - started_at) if started_at else None
+    # If no specific action matched, fall back to the most recent meaningful log line
+    # so the user always has SOMETHING to look at instead of "starting…" forever.
+    if not current_action and recent_lines:
+        current_action = recent_lines[-1][:200]
+
     return {
         "running": running,
         "stream_id": stream_id,
@@ -527,6 +603,7 @@ def _parse_events(events: list[dict], *, recent_limit: int, running: bool,
         "current_action": current_action,
         "completed": completed_recent,
         "stage_counts": stage_counts,
+        "recent_activity": recent_lines[-15:],
         "total_events": len(events),
     }
 
