@@ -37,6 +37,7 @@ web = [
     "jinja2>=3.1",
     "sse-starlette>=2.0",
     "python-multipart>=0.0.9",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

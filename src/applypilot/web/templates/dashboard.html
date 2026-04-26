@@ -3,7 +3,7 @@
 {% block breadcrumb %}Dashboard{% endblock %}
 
 {% block content %}
-<div x-data="dashboard()" x-init="load(); pollPipeline()" class="space-y-6">
+<div x-data="dashboard()" x-init="load(); pollPipeline(); loadProcs(); pollProcs()" class="space-y-6">
 
   <!-- Pipeline control panel -->
   <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
@@ -92,6 +92,74 @@
     </div>
   </div>
 
+  <!-- Process tracker -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <div class="text-sm font-semibold">Processes
+        <span class="text-xs text-slate-500 font-normal">(ApplyPilot-spawned only)</span>
+      </div>
+      <div class="flex gap-2">
+        <button @click="loadProcs()" class="text-xs px-2 py-1 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400">↻ Refresh</button>
+        <button @click="killRogueChrome()"
+                :disabled="!procs.some(p => p.role === 'chrome')"
+                class="text-xs px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ☒ Kill all rogue Chrome
+        </button>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase text-[10px]">
+          <tr>
+            <th class="text-left px-2 py-1">PID</th>
+            <th class="text-left px-2 py-1">Role</th>
+            <th class="text-left px-2 py-1">Name</th>
+            <th class="text-left px-2 py-1">CPU</th>
+            <th class="text-left px-2 py-1">Mem</th>
+            <th class="text-left px-2 py-1">Age</th>
+            <th class="text-left px-2 py-1">Cmdline</th>
+            <th class="text-right px-2 py-1"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="p in procs" :key="p.pid">
+            <tr class="border-t border-ink-700/60">
+              <td class="px-2 py-1 font-mono" x-text="p.pid"></td>
+              <td class="px-2 py-1">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono"
+                      :class="{
+                        'bg-brand-500/20 text-brand-400': p.role === 'chrome',
+                        'bg-emerald-700/30 text-emerald-300': p.role === 'python',
+                        'bg-amber-600/30 text-amber-300': p.role === 'node',
+                        'bg-rose-600/30 text-rose-300': p.role === 'claude',
+                        'bg-ink-900 text-slate-400': p.role === 'other',
+                      }"
+                      x-text="p.role"></span>
+              </td>
+              <td class="px-2 py-1 text-slate-300" x-text="p.name"></td>
+              <td class="px-2 py-1 text-slate-400" x-text="p.cpu_pct + '%'"></td>
+              <td class="px-2 py-1 text-slate-400" x-text="p.mem_mb.toFixed(0) + ' MB'"></td>
+              <td class="px-2 py-1 text-slate-400"
+                  x-text="p.age_s < 60 ? p.age_s + 's' : Math.floor(p.age_s/60) + 'm ' + (p.age_s%60) + 's'"></td>
+              <td class="px-2 py-1 text-slate-500 font-mono text-[10px] max-w-md truncate" :title="p.cmdline" x-text="p.cmdline"></td>
+              <td class="px-2 py-1 text-right">
+                <button @click="killProc(p)"
+                        :disabled="p.is_self"
+                        :title="p.is_self ? 'cannot kill UI server itself' : 'kill process and children'"
+                        class="text-xs px-2 py-0.5 rounded bg-rose-800 hover:bg-rose-700 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+                  Kill
+                </button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!procs.length">
+            <td colspan="8" class="text-center text-slate-500 px-2 py-4">No ApplyPilot processes running.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
     <div class="flex items-center justify-between mb-3">
       <div class="text-sm font-semibold">Live activity</div>
@@ -118,6 +186,37 @@
       pipeline: { running: false, rc: null, elapsed_s: 0, kind: null },
       pipelineError: '',
       startMode: 'chain',
+      procs: [],
+      async loadProcs() {
+        try {
+          const data = await (await fetch('/api/processes')).json();
+          this.procs = data.items || [];
+        } catch (_) {}
+      },
+      async pollProcs() {
+        await this.loadProcs();
+        setTimeout(() => this.pollProcs(), 8000);
+      },
+      async killProc(p) {
+        if (!confirm(`Kill ${p.role} pid=${p.pid}?\n\n${p.cmdline.slice(0, 200)}`)) return;
+        try {
+          const r = await fetch(`/api/processes/${p.pid}/kill`, { method: 'POST' });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            alert('kill failed: ' + (e.detail || r.status));
+          }
+          await this.loadProcs();
+        } catch (e) { alert(String(e)); }
+      },
+      async killRogueChrome() {
+        if (!confirm('Kill all ApplyPilot-spawned Chrome processes? Your regular browser is unaffected.')) return;
+        try {
+          const r = await fetch('/api/processes/kill-rogue-chrome', { method: 'POST' });
+          const data = await r.json();
+          alert(`Killed ${data.killed.length} processes` + (data.errors.length ? `; errors: ${data.errors.join(', ')}` : ''));
+          await this.loadProcs();
+        } catch (e) { alert(String(e)); }
+      },
       async pollPipeline() {
         try {
           this.pipeline = await (await fetch('/api/pipeline/status')).json();

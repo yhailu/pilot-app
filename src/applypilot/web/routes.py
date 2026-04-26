@@ -567,6 +567,26 @@ def register_routes(app: FastAPI, *, templates_dir: Path) -> None:
             raise HTTPException(404, "Stream not found or already finished.")
         return {"ok": True, "stopped": True}
 
+    # --- Process tracker: list / kill rogue ApplyPilot subprocesses ---
+
+    @app.get("/api/processes")
+    async def api_processes():
+        from applypilot.web import procs
+        return {"items": [p.to_dict() for p in procs.list_processes()]}
+
+    @app.post("/api/processes/{pid}/kill")
+    async def api_process_kill(pid: int):
+        from applypilot.web import procs
+        result = procs.kill_pid(pid, force=True, include_children=True)
+        if not result.get("ok"):
+            raise HTTPException(400, result.get("error", "kill failed"))
+        return result
+
+    @app.post("/api/processes/kill-rogue-chrome")
+    async def api_kill_rogue_chrome():
+        from applypilot.web import procs
+        return procs.kill_rogue_chrome()
+
 
 # ---------------------------------------------------------------------------
 # Helpers used only by the route handlers above.
