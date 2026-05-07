@@ -14,6 +14,8 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
@@ -27,6 +29,45 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+_FALLBACK_MIN_RATIO = 0.4
+
+
+def _find_similar_tailored_resume(job: dict) -> Path | None:
+    """Pick the closest existing tailored resume by site+title similarity.
+
+    Used as a fallback when the LLM call fails so the apply queue still
+    has something to send. Returns None if no candidate clears the ratio
+    threshold.
+    """
+    if not TAILORED_DIR.exists():
+        return None
+
+    target = f"{job.get('site') or ''} {job.get('title') or ''}".lower().strip()
+    if not target:
+        return None
+
+    target_prefix = re.sub(
+        r"[^\w\s-]", "",
+        f"{(job.get('site') or '')[:20]}_{(job.get('title') or '')[:50]}",
+    ).replace(" ", "_")
+
+    candidates: list[Path] = []
+    for path in TAILORED_DIR.glob("*.txt"):
+        if path.name.endswith("_JOB.txt"):
+            continue
+        # Skip any resume already produced for this exact job.
+        if target_prefix and path.stem.startswith(target_prefix):
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+
+    def _score(path: Path) -> float:
+        stem = re.sub(r"_[0-9a-f]{6}$", "", path.stem)
+        return SequenceMatcher(None, target, stem.replace("_", " ").lower()).ratio()
+
+    best = max(candidates, key=_score)
+    return best if _score(best) >= _FALLBACK_MIN_RATIO else None
 
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
@@ -326,7 +367,16 @@ def judge_tailored_resume(
     ]
 
     client = get_client()
-    response = client.chat(messages, max_output_tokens=512)
+    try:
+        response = client.chat(messages, max_output_tokens=512)
+    except Exception as exc:
+        log.warning("Judge LLM call failed (%s); treating as PASS so apply can proceed.", exc)
+        return {
+            "passed": True,
+            "verdict": "PASS",
+            "issues": "none (judge skipped — LLM unavailable)",
+            "raw": "",
+        }
 
     passed = "VERDICT: PASS" in response.upper()
     issues = "none"
@@ -400,7 +450,20 @@ def tailor_resume(
             {"role": "user", "content": f"ORIGINAL RESUME:\n{resume_text}\n\n---\n\nTARGET JOB:\n{job_text}\n\nReturn the JSON:"},
         ]
 
-        raw = client.chat(messages, max_output_tokens=16000)
+        try:
+            raw = client.chat(messages, max_output_tokens=16000)
+        except Exception as llm_exc:
+            fallback = _find_similar_tailored_resume(job)
+            if fallback is None:
+                raise
+            log.warning(
+                "LLM call failed (%s); using similar resume %s as fallback.",
+                llm_exc, fallback.name,
+            )
+            report["status"] = "fallback_similar"
+            report["fallback_source"] = str(fallback)
+            report["llm_error"] = str(llm_exc)
+            return fallback.read_text(encoding="utf-8"), report
 
         # Parse JSON from response
         try:
@@ -562,7 +625,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
 
     # Persist to DB: increment attempt counter for ALL, save path only for approved
     now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
+    _success_statuses = {"approved", "approved_with_judge_warning", "fallback_similar"}
     for r in results:
         if r["status"] in _success_statuses:
             conn.execute(

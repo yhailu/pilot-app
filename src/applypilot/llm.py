@@ -28,8 +28,18 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 
 log = logging.getLogger(__name__)
 
-_MAX_RETRIES = 5
+# Once one call fails (e.g. credits depleted), stop retrying inside LiteLLM
+# AND short-circuit every subsequent call in this process so we don't burn
+# the rest of the run hammering a dead provider. Each job's fallback path
+# (similar resume / fixed score=8 / similar cover letter) handles the gap.
+_MAX_RETRIES = 0
 _TIMEOUT = 120  # seconds
+_CIRCUIT_OPEN = False
+_CIRCUIT_REASON: str | None = None
+
+
+class LLMUnavailableError(RuntimeError):
+    """Raised when the circuit breaker is open — caller should use fallback."""
 _INFERRED_SOURCE_ORDER: tuple[tuple[str, str], ...] = (
     ("gemini", "GEMINI_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
@@ -179,6 +189,12 @@ class LLMClient:
         **extra: Unpack[LiteLLMExtra],
     ) -> str:
         """Send a completion request and return plain text content."""
+        global _CIRCUIT_OPEN, _CIRCUIT_REASON
+        if _CIRCUIT_OPEN:
+            raise LLMUnavailableError(
+                f"LLM circuit open: {_CIRCUIT_REASON}"
+            )
+
         # Use streaming mode when configured (required by some LLM proxies)
         if self._use_streaming:
             return self._chat_streaming(
@@ -190,13 +206,9 @@ class LLMClient:
                 **extra,
             )
 
-        # Standard non-streaming call
-        # Auto-populate fallbacks unless caller supplied one explicitly via extra.
-        if "fallbacks" not in extra:
-            fb = _DEFAULT_FALLBACKS.get(self.provider)
-            if fb:
-                # Don't fall back to the primary model itself.
-                extra["fallbacks"] = [m for m in fb if m != self.model]
+        # Standard non-streaming call. Skip the fallback model fan-out so a
+        # single failure costs one call, not five. The circuit breaker below
+        # ensures the second job doesn't even try the dead provider again.
         try:
             if temperature is None:
                 response = litellm.completion(
@@ -234,6 +246,13 @@ class LLMClient:
                 raise RuntimeError("LLM response contained no text content.")
             return text
         except Exception as exc:  # pragma: no cover - provider SDK exception types vary by backend/version.
+            _CIRCUIT_OPEN = True
+            _CIRCUIT_REASON = f"{self.provider}/{self.model}: {exc}"
+            log.warning(
+                "LLM circuit breaker tripped (%s). Subsequent calls in this "
+                "process will fail-fast and use per-stage fallbacks.",
+                _CIRCUIT_REASON,
+            )
             raise RuntimeError(f"LLM request failed ({self.provider}/{self.model}): {exc}") from exc
 
     def _chat_streaming(
@@ -251,11 +270,6 @@ class LLMClient:
         Some LLM proxies require streaming mode. This method uses stream=True
         and accumulates the chunks into a plain text response.
         """
-        # Auto-populate fallbacks unless caller supplied one explicitly via extra.
-        if "fallbacks" not in extra:
-            fb = _DEFAULT_FALLBACKS.get(self.provider)
-            if fb:
-                extra["fallbacks"] = [m for m in fb if m != self.model]
         try:
             kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -287,6 +301,14 @@ class LLMClient:
                 raise RuntimeError("LLM response contained no text content.")
             return text
         except Exception as exc:
+            global _CIRCUIT_OPEN, _CIRCUIT_REASON
+            _CIRCUIT_OPEN = True
+            _CIRCUIT_REASON = f"{self.provider}/{self.model}: {exc}"
+            log.warning(
+                "LLM circuit breaker tripped (%s). Subsequent calls in this "
+                "process will fail-fast and use per-stage fallbacks.",
+                _CIRCUIT_REASON,
+            )
             raise RuntimeError(f"LLM request failed ({self.provider}/{self.model}): {exc}") from exc
 
     def close(self) -> None:

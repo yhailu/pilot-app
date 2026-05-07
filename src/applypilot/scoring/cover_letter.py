@@ -9,6 +9,8 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection
@@ -23,6 +25,43 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+_FALLBACK_MIN_RATIO = 0.4
+
+
+def _find_similar_cover_letter(job: dict) -> Path | None:
+    """Pick the closest existing cover letter by site+title similarity.
+
+    Used as a fallback when the LLM call fails so the apply queue isn't
+    blocked on cover-letter generation. Returns None if no candidate
+    clears the ratio threshold.
+    """
+    if not COVER_LETTER_DIR.exists():
+        return None
+
+    target = f"{job.get('site') or ''} {job.get('title') or ''}".lower().strip()
+    if not target:
+        return None
+
+    target_prefix = re.sub(
+        r"[^\w\s-]", "",
+        f"{(job.get('site') or '')[:20]}_{(job.get('title') or '')[:50]}",
+    ).replace(" ", "_")
+
+    candidates: list[Path] = []
+    for path in COVER_LETTER_DIR.glob("*_CL.txt"):
+        if target_prefix and path.stem.startswith(target_prefix):
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+
+    def _score(path: Path) -> float:
+        # Strip trailing "_<6hex>_CL" → site_title
+        stem = re.sub(r"_[0-9a-f]{6}_CL$", "", path.stem)
+        return SequenceMatcher(None, target, stem.replace("_", " ").lower()).ratio()
+
+    best = max(candidates, key=_score)
+    return best if _score(best) >= _FALLBACK_MIN_RATIO else None
 
 
 # ── Prompt Builder (profile-driven) ──────────────────────────────────────
@@ -164,7 +203,17 @@ def generate_cover_letter(
             )},
         ]
 
-        letter = client.chat(messages, max_output_tokens=10000)
+        try:
+            letter = client.chat(messages, max_output_tokens=10000)
+        except Exception as llm_exc:
+            fallback = _find_similar_cover_letter(job)
+            if fallback is None:
+                raise
+            log.warning(
+                "Cover letter LLM call failed (%s); reusing similar letter %s.",
+                llm_exc, fallback.name,
+            )
+            return fallback.read_text(encoding="utf-8")
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 

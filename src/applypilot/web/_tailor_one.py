@@ -97,6 +97,7 @@ def main() -> int:
     messages = _build_prompt(resume_text, job, profile)
     started = time.time()
     chunks: list[str] = []
+    fallback_source: Path | None = None
 
     try:
         response = litellm.completion(
@@ -121,8 +122,16 @@ def main() -> int:
             print(piece, end="", flush=True)
         print()  # final newline so the buffer flushes a clean event
     except Exception as exc:
-        print(f"\nERROR: LLM stream failed: {exc}", flush=True)
-        return 5
+        from applypilot.scoring.tailor import _find_similar_tailored_resume
+
+        print(f"\nWARN: LLM stream failed: {exc}", flush=True)
+        fallback_source = _find_similar_tailored_resume(job)
+        if fallback_source is None:
+            print("ERROR: no similar tailored resume available for fallback", flush=True)
+            return 5
+        print(f"-- falling back to similar resume: {fallback_source.name} --", flush=True)
+        chunks = [fallback_source.read_text(encoding="utf-8")]
+        print(chunks[0], flush=True)
 
     elapsed = time.time() - started
 
@@ -138,13 +147,15 @@ def main() -> int:
     txt_path.write_text(text, encoding="utf-8")
 
     report = {
-        "status": "approved_via_web",
+        "status": "fallback_similar" if fallback_source else "approved_via_web",
         "attempts": 1,
         "elapsed_sec": round(elapsed, 2),
         "model": cfg.model,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "web._tailor_one",
     }
+    if fallback_source:
+        report["fallback_source"] = str(fallback_source)
     report_path = out_dir / f"{prefix}_REPORT.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 

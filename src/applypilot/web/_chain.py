@@ -66,9 +66,7 @@ def main() -> int:
         _section(log, "STAGE 1: applypilot run --workers 4")
         rc1 = _run_streamed([sys.executable, "-m", "applypilot", "run", "--workers", "4"], log)
         if rc1 != 0:
-            _section(log, f"STAGE 1 exited rc={rc1}, skipping apply")
-            log.write(f"[chain] finished {datetime.now().isoformat()} rc={rc1}\n")
-            return rc1
+            _section(log, f"STAGE 1 exited rc={rc1}, continuing to apply on already-tailored jobs")
 
         _section(log, "STAGE 2: applypilot apply --limit 100")
         rc2 = _run_streamed([sys.executable, "-m", "applypilot", "apply", "--limit", "100"], log)
