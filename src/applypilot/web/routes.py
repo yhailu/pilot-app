@@ -29,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from applypilot.config import APP_DIR, ENV_PATH, LOG_DIR
 from applypilot.database import get_connection, get_stats
 from applypilot.web import streams
+from applypilot.analyze import analyze_failures, apply_fixes, reset_fixable_failures
 from applypilot.web.models import (
     JobMarkRequest,
     ModelEntry,
@@ -397,6 +398,57 @@ def register_routes(app: FastAPI, *, templates_dir: Path) -> None:
             "GROUP BY site ORDER BY c DESC"
         ).fetchall()
         return [{"site": r[0], "count": r[1]} for r in rows]
+
+    # --- Analyze page + API ---
+
+    @app.get("/analyze", response_class=HTMLResponse, include_in_schema=False)
+    async def analyze_page(request: Request):
+        return templates.TemplateResponse("analyze.html", {"request": request, "loop_active": _is_loop_active()})
+
+    @app.get("/api/analyze")
+    async def api_analyze():
+        """Run failure analysis and return structured report."""
+        from applypilot.database import init_db as _init_db
+        _init_db()
+        analysis = analyze_failures()
+        domains = {}
+        for domain, data in analysis.get("domains", {}).items():
+            domains[domain] = {
+                "count": data["count"],
+                "categories": dict(data["categories"]),
+                "errors": data["errors"][:5],
+                "statuses": dict(data["statuses"]),
+            }
+        return {
+            "summary": analysis["summary"],
+            "domains": domains,
+            "mfa_findings": analysis["mfa_findings"][:20],
+            "recommendations": analysis["recommendations"],
+        }
+
+    @app.post("/api/analyze/fix")
+    async def api_analyze_fix(request: Request):
+        """Apply recommended fixes from the analyzer."""
+        body: dict = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        do_reset = body.get("reset", False)
+        from applypilot.database import init_db as _init_db
+        _init_db()
+        analysis = analyze_failures()
+        recs = analysis["recommendations"]
+        changes = apply_fixes(recs, dry_run=False)
+        reset_count = 0
+        if do_reset:
+            reset_count = reset_fixable_failures(recs, dry_run=False)
+        return {
+            "ok": True,
+            "changes": changes,
+            "reset_count": reset_count,
+            "recommendation_count": len(recs),
+        }
 
     # --- File downloads ---
 

@@ -1,3 +1,4 @@
+
 """Chrome lifecycle management for apply workers.
 
 Handles launching an isolated Chrome instance with remote debugging,

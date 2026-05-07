@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+{% block title %}Analyze · ApplyPilot{% endblock %}
+{% block breadcrumb %}Failure Analysis{% endblock %}
+
+{% block content %}
+<div x-data="analyzePage()" x-init="load()" class="space-y-6">
+
+  <!-- Header + action buttons -->
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <h1 class="text-xl font-semibold">Failure Analysis</h1>
+      <p class="text-xs text-slate-500 mt-1">Scans the database &amp; logs for patterns, recommends and applies fixes</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="load()" :disabled="loading" class="text-xs px-3 py-1.5 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400 disabled:opacity-50">
+        ↻ Refresh
+      </button>
+      <button @click="applyFixes(false)" :disabled="loading || !recommendations.length" class="text-xs px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+        🔧 Auto-Fix Config
+      </button>
+      <button @click="applyFixes(true)" :disabled="loading || !recommendations.length" class="text-xs px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-400 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+        🔧 Fix + Reset Failed
+      </button>
+    </div>
+  </div>
+
+  <div x-show="loading" class="text-center py-12 text-slate-500">
+    <div class="animate-pulse text-lg">Analyzing failures...</div>
+  </div>
+
+  <!-- Fix result banner -->
+  <div x-show="fixResult" class="bg-emerald-900/30 border border-emerald-700/40 rounded-lg p-4">
+    <div class="text-sm font-semibold text-emerald-300 mb-2">✓ Fixes Applied</div>
+    <template x-for="(change, idx) in fixResult?.changes || []" :key="idx">
+      <div class="text-xs text-emerald-200/80 py-0.5" x-text="change"></div>
+    </template>
+    <div x-show="fixResult?.reset_count > 0" class="text-xs text-brand-400 mt-2"
+         x-text="'Reset ' + fixResult.reset_count + ' job(s) for retry'"></div>
+  </div>
+
+  <!-- Summary cards -->
+  <div x-show="!loading" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-500">Applied</div>
+      <div class="text-2xl font-semibold text-emerald-400 mt-1" x-text="summary.total_applied || 0"></div>
+    </div>
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-500">Failed</div>
+      <div class="text-2xl font-semibold text-rose-400 mt-1" x-text="summary.total_failed || 0"></div>
+    </div>
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-500">Success Rate</div>
+      <div class="text-2xl font-semibold mt-1" x-text="successRate + '%'"></div>
+    </div>
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-500">Fixable</div>
+      <div class="text-2xl font-semibold text-brand-400 mt-1" x-text="recommendations.length"></div>
+    </div>
+  </div>
+
+  <div x-show="!loading" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Failures by category -->
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-3">Failures by Category</div>
+      <template x-for="[cat, count] in Object.entries(summary.by_category || {})" :key="cat">
+        <div class="flex items-center justify-between text-xs py-1.5 border-b border-ink-700/40 last:border-0">
+          <div class="flex items-center gap-2">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-mono" :class="{
+              'bg-emerald-700/30 text-emerald-300': cat === 'mfa_email' || cat === 'login_issue',
+              'bg-rose-700/30 text-rose-300': cat === 'captcha' || cat === 'sso',
+              'bg-amber-600/30 text-amber-300': cat === 'form_issue',
+              'bg-slate-700/30 text-slate-400': cat === 'expired' || cat === 'not_eligible' || cat === 'not_a_job',
+              'bg-ink-900 text-slate-400': cat === 'other' || cat === 'unknown',
+            }" x-text="cat"></span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-slate-300 font-mono" x-text="count"></span>
+            <div class="w-24 h-1.5 bg-ink-900 rounded">
+              <div class="h-1.5 rounded bg-rose-500/60"
+                   :style="'width:' + Math.round(count / Math.max(1, summary.total_failed) * 100) + '%'"></div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div x-show="!Object.keys(summary.by_category || {}).length" class="text-xs text-slate-500">No failures yet.</div>
+    </div>
+
+    <!-- Failures by status -->
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+      <div class="text-sm font-semibold mb-3">Failures by Status</div>
+      <template x-for="[status, count] in Object.entries(summary.by_status || {})" :key="status">
+        <div class="flex items-center justify-between text-xs py-1.5 border-b border-ink-700/40 last:border-0">
+          <span class="text-slate-300" x-text="status"></span>
+          <span class="text-slate-400 font-mono" x-text="count"></span>
+        </div>
+      </template>
+      <div x-show="!Object.keys(summary.by_status || {}).length" class="text-xs text-slate-500">No failures yet.</div>
+    </div>
+  </div>
+
+  <!-- Top failing domains -->
+  <div x-show="!loading && Object.keys(domains).length" class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-sm font-semibold mb-3">Top Failing Domains</div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase text-[10px]">
+          <tr>
+            <th class="text-left px-2 py-1">Domain</th>
+            <th class="text-right px-2 py-1">Failures</th>
+            <th class="text-left px-2 py-1">Top Category</th>
+            <th class="text-left px-2 py-1">Sample Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="[domain, data] in sortedDomains.slice(0, 15)" :key="domain">
+            <tr class="border-t border-ink-700/60">
+              <td class="px-2 py-1.5 text-slate-300 font-mono" x-text="domain"></td>
+              <td class="px-2 py-1.5 text-right font-mono" x-text="data.count"></td>
+              <td class="px-2 py-1.5">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-ink-900" x-text="topCategory(data)"></span>
+              </td>
+              <td class="px-2 py-1.5 text-slate-500 truncate max-w-xs"
+                  x-text="(data.errors && data.errors[0]) || ''"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- MFA findings -->
+  <div x-show="!loading && mfaFindings.length" class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-sm font-semibold mb-3">
+      <span class="text-rose-400">⚠</span> MFA / Email Code Detections
+      <span class="text-xs text-slate-500 font-normal ml-2">found in worker logs</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase text-[10px]">
+          <tr>
+            <th class="text-left px-2 py-1">Domain</th>
+            <th class="text-left px-2 py-1">Pattern</th>
+            <th class="text-left px-2 py-1">Log File</th>
+            <th class="text-left px-2 py-1">Snippet</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="(finding, idx) in uniqueMfa" :key="idx">
+            <tr class="border-t border-ink-700/60">
+              <td class="px-2 py-1.5 text-slate-300 font-mono" x-text="finding.domain"></td>
+              <td class="px-2 py-1.5">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-rose-900/30 text-rose-300"
+                      x-text="finding.pattern"></span>
+              </td>
+              <td class="px-2 py-1.5 text-slate-500" x-text="finding.log_file"></td>
+              <td class="px-2 py-1.5 text-slate-500 truncate max-w-sm" x-text="finding.snippet"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recommendations -->
+  <div x-show="!loading && recommendations.length" class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-sm font-semibold mb-3">
+      Recommendations
+      <span class="text-xs text-slate-500 font-normal ml-2" x-text="recommendations.length + ' action(s)'"></span>
+    </div>
+    <div class="space-y-2">
+      <template x-for="(rec, idx) in recommendations" :key="idx">
+        <div class="flex items-start gap-3 text-xs py-2 border-b border-ink-700/40 last:border-0">
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-mono mt-0.5 whitespace-nowrap" :class="{
+            'bg-rose-700/30 text-rose-300': rec.priority === 'high',
+            'bg-amber-600/30 text-amber-300': rec.priority === 'medium',
+            'bg-ink-900 text-slate-400': rec.priority === 'low',
+          }" x-text="rec.priority.toUpperCase()"></span>
+          <div class="flex-1 min-w-0">
+            <div class="text-slate-300">
+              <span class="font-mono text-brand-400" x-text="rec.action"></span>
+              <span class="text-slate-500 mx-1">→</span>
+              <span class="font-mono" x-text="rec.target"></span>
+            </div>
+            <div class="text-slate-500 mt-0.5" x-text="rec.reason"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- No failures -->
+  <div x-show="!loading && !summary.total_failed" class="bg-ink-800 border border-ink-700 rounded-lg p-8 text-center">
+    <div class="text-2xl mb-2">✨</div>
+    <div class="text-sm text-slate-300">No failures to analyze</div>
+    <div class="text-xs text-slate-500 mt-1">Run <code class="text-brand-400">applypilot apply</code> first</div>
+  </div>
+</div>
+
+<script>
+  function analyzePage() {
+    return {
+      loading: true,
+      summary: {},
+      domains: {},
+      mfaFindings: [],
+      recommendations: [],
+      fixResult: null,
+
+      get successRate() {
+        const total = (this.summary.total_applied || 0) + (this.summary.total_failed || 0);
+        return total > 0 ? ((this.summary.total_applied || 0) / total * 100).toFixed(1) : '0.0';
+      },
+      get sortedDomains() {
+        return Object.entries(this.domains).sort((a, b) => b[1].count - a[1].count);
+      },
+      get uniqueMfa() {
+        const seen = new Set();
+        return this.mfaFindings.filter(f => {
+          const key = f.domain + ':' + f.pattern;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      },
+      topCategory(data) {
+        if (!data.categories) return '?';
+        let max = 0, top = '?';
+        for (const [cat, cnt] of Object.entries(data.categories)) {
+          if (cnt > max) { max = cnt; top = cat; }
+        }
+        return top;
+      },
+      async load() {
+        this.loading = true;
+        this.fixResult = null;
+        try {
+          const data = await (await fetch('/api/analyze')).json();
+          this.summary = data.summary || {};
+          this.domains = data.domains || {};
+          this.mfaFindings = data.mfa_findings || [];
+          this.recommendations = data.recommendations || [];
+        } catch (e) { console.error('analyze load error:', e); }
+        this.loading = false;
+      },
+      async applyFixes(withReset) {
+        if (!confirm(withReset
+          ? 'Apply config fixes AND reset MFA-failed jobs for retry?'
+          : 'Apply config fixes (block failing domains, update sites.yaml)?'
+        )) return;
+        this.loading = true;
+        try {
+          const resp = await fetch('/api/analyze/fix', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ reset: withReset }),
+          });
+          this.fixResult = await resp.json();
+          await this.load();
+        } catch (e) {
+          console.error('fix error:', e);
+          alert('Fix failed: ' + e);
+        }
+        this.loading = false;
+      },
+    };
+  }
+</script>
+{% endblock %}

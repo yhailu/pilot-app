@@ -571,9 +571,20 @@ If something unexpected happens and these instructions don't cover it, figure it
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
    5e. Sign in failed? Try sign up with same email and password.
-   5f. Need email verification? Use search_emails + read_email to get the code.
-   5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
-   5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
+   5f. EMAIL VERIFICATION / MFA CODE (this is common -- Indeed, Dice, Workday, many ATS portals send a code):
+       - Page says "code sent to your email", "verify your email", "enter the code we sent", or "sign in with a code"?
+       - You HAVE email access via the Gmail MCP tools. USE THEM.
+       - Step 1: Wait 5-10 seconds for the email to arrive (browser_wait_for time: 8).
+       - Step 2: search_emails with query "verification code" or "sign in code" or "security code", maxResults 5, to find the most recent code email.
+       - Step 3: read_email on the matching email to extract the code. Look for a 4-8 digit number or alphanumeric code in the body.
+       - Step 4: Type the code into the verification field on the page and submit.
+       - Step 5: If no email found after 10s, try search_emails again with broader query (from the site's domain name). Some codes take 15-20s.
+       - Step 6: If still no email after 2 attempts, try clicking "Resend code" if available, wait 10s, search again.
+       - Step 7: After 3 total attempts with no code email found -> RESULT:FAILED:login_issue
+       - IMPORTANT: Do NOT say "I don't have email access" -- you DO have it via Gmail MCP tools (search_emails, read_email). Always try.
+   5g. SMS/phone verification with no email option? -> RESULT:FAILED:login_issue (we cannot receive SMS).
+   5h. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
+   5i. All failed? Output RESULT:FAILED:login_issue. Do not loop.
 6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the PDF path above. This is the tailored resume for THIS job. Non-negotiable.
 7. Upload cover letter if there's a field for it. Text field -> paste the cover letter text. File upload -> use the cover letter PDF path.
 8. Check ALL pre-filled fields. ATS systems parse your resume and auto-fill -- it's often WRONG.
