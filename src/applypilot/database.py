@@ -180,6 +180,9 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    # Granular failure context captured by run_job: stage, last_url,
+    # last_tool, mfa_signals, platform, tenant — see analyze.classify_job.
+    "apply_failure_detail": "TEXT",
 }
 
 
@@ -242,9 +245,23 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     # Total jobs
     stats["total"] = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
 
-    # By site breakdown
+    # By site breakdown — collapse aggregator subvariants like
+    # "jobright:CompanyName" or "jobright:Anikasystems" into the parent
+    # "jobright" so the dashboard shows one row per source, not one per
+    # company the aggregator surfaced.
     rows = conn.execute(
-        "SELECT site, COUNT(*) as cnt FROM jobs GROUP BY site ORDER BY cnt DESC"
+        """
+        SELECT
+            CASE
+                WHEN site LIKE '%:%'
+                THEN substr(site, 1, instr(site, ':') - 1)
+                ELSE site
+            END AS source,
+            COUNT(*) AS cnt
+        FROM jobs
+        GROUP BY source
+        ORDER BY cnt DESC
+        """
     ).fetchall()
     stats["by_site"] = [(row[0], row[1]) for row in rows]
 

@@ -284,6 +284,44 @@ def apply(
 
 
 @app.command()
+def analyze(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report only, don't modify config files."),
+    reset: bool = typer.Option(False, "--reset", help="Reset fixable failures for retry after applying fixes."),
+    job: Optional[str] = typer.Option(None, "--job", help="Analyze a single job by URL (prints failure detail + suggested fix)."),
+    fix: bool = typer.Option(False, "--fix", help="With --job, apply the recommended fix (reset, blocklist, mark manual, ...)."),
+    auto_fix_all: bool = typer.Option(False, "--auto-fix-all", help="Sweep every failed job and apply the per-job fix (resets transient, blocklists Workday+MFA, etc.)."),
+) -> None:
+    """Analyze failures from the last apply run and auto-fix config.
+
+    Per-job mode:
+      applypilot analyze --job <url>            # show what failed, recommend fix
+      applypilot analyze --job <url> --fix      # apply the recommended fix
+      applypilot analyze --job <url> --fix --dry-run  # preview the fix
+
+    Sweep mode:
+      applypilot analyze --auto-fix-all              # apply per-job fix to every failure
+      applypilot analyze --auto-fix-all --dry-run    # preview only
+    """
+    _bootstrap()
+
+    if job:
+        from applypilot.analyze import run_job_analysis
+        rc = run_job_analysis(job, fix=fix, dry_run=dry_run)
+        if rc:
+            raise typer.Exit(code=rc)
+        return
+
+    if auto_fix_all:
+        from applypilot.analyze import run_auto_fix_all
+        run_auto_fix_all(dry_run=dry_run)
+        return
+
+    from applypilot.analyze import run_analysis
+
+    run_analysis(dry_run=dry_run, reset=reset)
+
+
+@app.command()
 def status() -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()
