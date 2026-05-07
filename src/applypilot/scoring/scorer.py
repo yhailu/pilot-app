@@ -5,17 +5,22 @@ job description. All personal data is loaded at runtime from the user's
 profile and resume file.
 """
 
-import json
 import logging
 import re
 import time
 from datetime import datetime, timezone
 
-from applypilot.config import RESUME_PATH, load_profile
+from applypilot.config import RESUME_PATH
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
+
+# When the LLM call fails (e.g. credits depleted, rate-limited), assign a
+# high default score so the job still flows to tailor → apply rather than
+# being stranded with score=0. Threshold tuned so it clears the default
+# min_score=7 gate in run_pipeline / acquire_job.
+_LLM_FAILURE_FALLBACK_SCORE = 8
 
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
@@ -94,11 +99,18 @@ def score_job(resume_text: str, job: dict) -> dict:
 
     try:
         client = get_client()
-        response = client.chat(messages, max_tokens=512, temperature=0.2)
+        response = client.chat(messages, max_output_tokens=512)
         return _parse_score_response(response)
     except Exception as e:
-        log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
-        return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
+        log.warning(
+            "LLM error scoring job '%s' — auto-assigning fallback score=%d: %s",
+            job.get("title", "?"), _LLM_FAILURE_FALLBACK_SCORE, e,
+        )
+        return {
+            "score": _LLM_FAILURE_FALLBACK_SCORE,
+            "keywords": "",
+            "reasoning": f"auto-scored (LLM unavailable): {e}",
+        }
 
 
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:

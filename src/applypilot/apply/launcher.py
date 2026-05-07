@@ -25,7 +25,7 @@ from rich.live import Live
 
 from applypilot import config
 from applypilot.database import get_connection
-from applypilot.apply import chrome, dashboard, prompt as prompt_mod
+from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
     reset_worker_dir, cleanup_on_exit, _kill_process_tree,
@@ -111,7 +111,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -125,8 +125,15 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_sites)
             url_clauses = ""
             if blocked_patterns:
-                url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
-                params.extend(blocked_patterns)
+                # Check both url and application_url so jobs whose `url` is
+                # an aggregator (e.g. jobright.ai) but whose `application_url`
+                # resolves to a blocked site (e.g. linkedin.com) are filtered.
+                url_clauses = " ".join(
+                    "AND url NOT LIKE ? AND COALESCE(application_url, '') NOT LIKE ?"
+                    for _ in blocked_patterns
+                )
+                for p in blocked_patterns:
+                    params.extend([p, p])
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
@@ -174,15 +181,18 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 
 def mark_result(url: str, status: str, error: str | None = None,
                 permanent: bool = False, duration_ms: int | None = None,
-                task_id: str | None = None) -> None:
+                task_id: str | None = None,
+                failure_detail: dict | None = None) -> None:
     """Update a job's apply status in the database."""
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
+    detail_json = json.dumps(failure_detail) if failure_detail else None
     if status == "applied":
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
-                           apply_duration_ms = ?, apply_task_id = ?
+                           apply_duration_ms = ?, apply_task_id = ?,
+                           apply_failure_detail = NULL
             WHERE url = ?
         """, (now, duration_ms, task_id, url))
     else:
@@ -190,9 +200,10 @@ def mark_result(url: str, status: str, error: str | None = None,
         conn.execute(f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
-                           apply_duration_ms = ?, apply_task_id = ?
+                           apply_duration_ms = ?, apply_task_id = ?,
+                           apply_failure_detail = ?
             WHERE url = ?
-        """, (status, error or "unknown", duration_ms, task_id, url))
+        """, (status, error or "unknown", duration_ms, task_id, detail_json, url))
     conn.commit()
 
 
@@ -295,13 +306,14 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 
 def run_job(job: dict, port: int, worker_id: int = 0,
-            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
+            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int, dict | None]:
     """Spawn a Claude Code session for one job application.
 
     Returns:
-        Tuple of (status_string, duration_ms). Status is one of:
+        Tuple of (status_string, duration_ms, failure_detail). Status is one of:
         'applied', 'expired', 'captcha', 'login_issue',
-        'failed:reason', or 'skipped'.
+        'failed:reason', or 'skipped'. failure_detail is None for applied/skipped,
+        otherwise a dict from _classify_failure_detail().
     """
     # Read tailored resume text
     resume_path = job.get("tailored_resume_path")
@@ -321,9 +333,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
     mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
-    # Build claude command
+    # Build claude command. On Windows `claude` is a .CMD shim; subprocess.Popen
+    # needs the full path to execute it.
+    import shutil as _shutil
+    claude_exe = _shutil.which("claude") or "claude"
     cmd = [
-        "claude",
+        claude_exe,
         "--model", model,
         "-p",
         "--mcp-config", str(mcp_config_path),
@@ -367,6 +382,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     start = time.time()
     stats: dict = {}
     proc = None
+    last_url: str | None = None
+    last_tool: str | None = None
+    urls_seen: list[str] = []
+    if job.get("application_url"):
+        urls_seen.append(job["application_url"])
 
     try:
         proc = subprocess.Popen(
@@ -410,8 +430,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                                     .replace("mcp__gmail__", "gmail:")
                                 )
                                 inp = block.get("input", {})
+                                last_tool = name
                                 if "url" in inp:
                                     desc = f"{name} {inp['url'][:60]}"
+                                    if isinstance(inp["url"], str):
+                                        last_url = inp["url"]
+                                        urls_seen.append(last_url)
                                 elif "ref" in inp:
                                     desc = f"{name} {inp.get('element', inp.get('text', ''))}"[:50]
                                 elif "fields" in inp:
@@ -446,11 +470,17 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         proc = None
 
         if returncode and returncode < 0:
-            return "skipped", int((time.time() - start) * 1000)
+            return "skipped", int((time.time() - start) * 1000), None
 
         output = "\n".join(text_parts)
         elapsed = int(time.time() - start)
         duration_ms = int((time.time() - start) * 1000)
+
+        def _detail(reason: str) -> dict:
+            return _classify_failure_detail(
+                output=output, last_url=last_url, last_tool=last_tool,
+                reason=reason, urls_seen=urls_seen,
+            )
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
@@ -470,7 +500,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                 add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
                 update_state(worker_id, status=result_status.lower(),
                              last_action=f"{result_status} ({elapsed}s)")
-                return result_status.lower(), duration_ms
+                detail = None if result_status == "APPLIED" else _detail(result_status.lower())
+                return result_status.lower(), duration_ms, detail
 
         if "RESULT:FAILED" in output:
             for out_line in output.split("\n"):
@@ -486,28 +517,36 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                         add_event(f"[W{worker_id}] {reason.upper()} ({elapsed}s): {job['title'][:30]}")
                         update_state(worker_id, status=reason,
                                      last_action=f"{reason.upper()} ({elapsed}s)")
-                        return reason, duration_ms
+                        return reason, duration_ms, _detail(reason)
                     add_event(f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}")
                     update_state(worker_id, status="failed",
                                  last_action=f"FAILED: {reason[:25]}")
-                    return f"failed:{reason}", duration_ms
-            return "failed:unknown", duration_ms
+                    return f"failed:{reason}", duration_ms, _detail(reason)
+            return "failed:unknown", duration_ms, _detail("unknown")
 
         add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
         update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
-        return "failed:no_result_line", duration_ms
+        return "failed:no_result_line", duration_ms, _detail("no_result_line")
 
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start) * 1000)
         elapsed = int(time.time() - start)
         add_event(f"[W{worker_id}] TIMEOUT ({elapsed}s)")
         update_state(worker_id, status="failed", last_action=f"TIMEOUT ({elapsed}s)")
-        return "failed:timeout", duration_ms
+        detail = _classify_failure_detail(
+            output="\n".join(text_parts), last_url=last_url, last_tool=last_tool,
+            reason="timeout", urls_seen=urls_seen,
+        )
+        return "failed:timeout", duration_ms, detail
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
         add_event(f"[W{worker_id}] ERROR: {str(e)[:40]}")
         update_state(worker_id, status="failed", last_action=f"ERROR: {str(e)[:25]}")
-        return f"failed:{str(e)[:100]}", duration_ms
+        detail = _classify_failure_detail(
+            output="\n".join(text_parts), last_url=last_url, last_tool=last_tool,
+            reason=str(e)[:100], urls_seen=urls_seen,
+        )
+        return f"failed:{str(e)[:100]}", duration_ms, detail
     finally:
         with _claude_lock:
             _claude_procs.pop(worker_id, None)
@@ -518,6 +557,105 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 # ---------------------------------------------------------------------------
 # Permanent failure classification
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Failure detail classification — fingerprints platform + auth-gate so the
+# analyze command can tell us "Workday tenant X requires email MFA" instead
+# of just "login_issue", and so future runs can skip the same trap.
+# ---------------------------------------------------------------------------
+
+_PLATFORM_HOSTS: tuple[tuple[str, str], ...] = (
+    ("myworkdayjobs.com", "workday"),
+    ("workday.com", "workday"),
+    ("greenhouse.io", "greenhouse"),
+    ("lever.co", "lever"),
+    ("smartrecruiters.com", "smartrecruiters"),
+    ("icims.com", "icims"),
+    ("ashbyhq.com", "ashby"),
+    ("breezy.hr", "breezy"),
+    ("recruitee.com", "recruitee"),
+    ("bamboohr.com", "bamboohr"),
+    ("jobvite.com", "jobvite"),
+)
+
+_MFA_PHRASES: tuple[str, ...] = (
+    "verification code", "verify your email", "verify your identity",
+    "code we sent", "code sent to", "check your email",
+    "two-factor", "two factor", "2fa", "one-time", "one time password",
+    "otp", "authenticator", "email code", "sms code",
+)
+
+
+def _detect_platform(url: str | None) -> tuple[str | None, str | None]:
+    """Return (platform_name, tenant) for a URL, or (None, None)."""
+    if not url:
+        return (None, None)
+    host = ""
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return (None, None)
+    for needle, platform in _PLATFORM_HOSTS:
+        if needle in host:
+            # Tenant = leftmost label (e.g. thomsonreuters.wd5.myworkdayjobs.com → thomsonreuters)
+            tenant = host.split(".", 1)[0] if host else None
+            return (platform, tenant)
+    return (None, None)
+
+
+def _classify_failure_detail(
+    *, output: str, last_url: str | None, last_tool: str | None,
+    reason: str, urls_seen: list[str],
+) -> dict:
+    """Build the JSON blob persisted to apply_failure_detail."""
+    text = output.lower()
+    mfa_signals = [p for p in _MFA_PHRASES if p in text]
+
+    # Pick the most-specific platform host we ever visited, not just the last.
+    platform: str | None = None
+    tenant: str | None = None
+    platform_url: str | None = None
+    for u in reversed(urls_seen):
+        p, t = _detect_platform(u)
+        if p:
+            platform, tenant, platform_url = p, t, u
+            break
+
+    # Stage inference from reason + signals.
+    stage = "unknown"
+    r = reason.lower()
+    if mfa_signals or "mfa" in r or "verification" in r:
+        stage = "mfa_email"
+    elif "captcha" in r or "cloudflare" in r:
+        stage = "captcha"
+    elif "login" in r or "sso" in r or "sign in" in r:
+        stage = "login"
+    elif "form" in r or "field" in r or "dropdown" in r or "validation" in r:
+        stage = "form"
+    elif "expired" in r or "no longer" in r:
+        stage = "expired"
+    elif "not_eligible" in r or "location" in r or "authoriz" in r:
+        stage = "not_eligible"
+    elif "upload" in r:
+        stage = "upload"
+    elif "submit" in r:
+        stage = "submit"
+    elif "timeout" in r or "broken pipe" in r:
+        stage = "transient"
+
+    return {
+        "stage": stage,
+        "platform": platform,
+        "tenant": tenant,
+        "platform_url": platform_url,
+        "last_url": last_url,
+        "last_tool": last_tool,
+        "mfa_signals": mfa_signals[:5],
+        "reason": reason,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+
 
 PERMANENT_FAILURES: set[str] = {
     "expired", "captcha", "login_issue",
@@ -601,8 +739,9 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             add_event(f"[W{worker_id}] Launching Chrome...")
             chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
-            result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run)
+            result, duration_ms, failure_detail = run_job(
+                job, port=port, worker_id=worker_id, model=model, dry_run=dry_run,
+            )
 
             if result == "skipped":
                 release_lock(job["url"])
@@ -617,7 +756,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 reason = result.split(":", 1)[-1] if ":" in result else result
                 mark_result(job["url"], "failed", reason,
                             permanent=_is_permanent_failure(result),
-                            duration_ms=duration_ms)
+                            duration_ms=duration_ms,
+                            failure_detail=failure_detail)
                 failed += 1
                 update_state(worker_id, jobs_failed=failed,
                              jobs_done=applied + failed)

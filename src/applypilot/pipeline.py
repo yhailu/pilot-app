@@ -60,8 +60,8 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+    """Stage: Job discovery — JobSpy, Workday, smart-extract, and JobRight scrapers."""
+    stats: dict = {"jobspy": None, "workday": None, "smartextract": None, "jobright": None}
 
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
@@ -73,6 +73,17 @@ def _run_discover(workers: int = 1) -> dict:
         log.error("JobSpy crawl failed: %s", e)
         console.print(f"  [red]JobSpy error:[/red] {e}")
         stats["jobspy"] = f"error: {e}"
+
+    # JobRight (skipped if credentials absent)
+    console.print("  [cyan]JobRight recommended-jobs scraper...[/cyan]")
+    try:
+        from applypilot.discovery.jobright import run_jobright_discovery
+        result = run_jobright_discovery()
+        stats["jobright"] = "skipped" if result.get("skipped") else "ok"
+    except Exception as e:
+        log.error("JobRight scraper failed: %s", e)
+        console.print(f"  [red]JobRight error:[/red] {e}")
+        stats["jobright"] = f"error: {e}"
 
     # Workday corporate scraper
     console.print("  [cyan]Workday corporate scraper...[/cyan]")
@@ -384,7 +395,7 @@ def _run_streaming(ordered: list[str], min_score: int, workers: int = 1,
     stop_event = threading.Event()
     pipeline_start = time.time()
 
-    console.print(f"\n  [bold cyan]STREAMING MODE[/bold cyan] — stages run concurrently")
+    console.print("\n  [bold cyan]STREAMING MODE[/bold cyan] — stages run concurrently")
     console.print(f"  Poll interval: {_STREAM_POLL_INTERVAL}s\n")
 
     # Mark stages NOT in `ordered` as done so downstream doesn't wait for them
@@ -492,7 +503,7 @@ def run_pipeline(
         for name in ordered:
             meta = STAGE_META[name]
             console.print(f"    {name:<12s}  {meta['desc']}")
-        console.print(f"\n  No changes made.")
+        console.print("\n  No changes made.")
         return {"stages": [], "errors": {}, "elapsed": 0.0}
 
     # Execute
@@ -527,7 +538,7 @@ def run_pipeline(
 
     # Final DB stats
     final = get_stats()
-    console.print(f"\n  [bold]DB Final State:[/bold]")
+    console.print("\n  [bold]DB Final State:[/bold]")
     console.print(f"    Total jobs:     {final['total']}")
     console.print(f"    With desc:      {final['with_description']}")
     console.print(f"    Scored:         {final['scored']}")

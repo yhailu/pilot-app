@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import typer
@@ -11,11 +12,37 @@ from rich.table import Table
 
 from applypilot import __version__
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
+
+def _configure_logging() -> None:
+    """Set consistent logging output for CLI runs."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # Keep LiteLLM internals quiet by default; warnings/errors still surface.
+    for name in ("LiteLLM", "litellm"):
+        noisy = logging.getLogger(name)
+        noisy.handlers.clear()
+        noisy.setLevel(logging.WARNING)
+        noisy.propagate = True
+
+    # Route verbose tailor/cover loggers to a file instead of the terminal.
+    # Per-attempt warnings and validation details are useful for debugging
+    # but too noisy for normal CLI output.
+    from applypilot.config import LOG_DIR
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _file_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
+    for logger_name in ("applypilot.scoring.tailor", "applypilot.scoring.cover_letter"):
+        file_log = logging.getLogger(logger_name)
+        file_log.propagate = False  # suppress terminal output
+        fh = logging.FileHandler(LOG_DIR / f"{logger_name.split('.')[-1]}.log", encoding="utf-8")
+        fh.setFormatter(_file_fmt)
+        file_log.addHandler(fh)
+
+
+_configure_logging()
 
 app = typer.Typer(
     name="applypilot",
@@ -211,7 +238,7 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
@@ -222,7 +249,7 @@ def apply(
             raise typer.Exit(code=1)
         mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
+        console.print("\n[bold]Run manually:[/bold]")
         console.print(
             f"  claude --model {model} -p "
             f"--mcp-config {mcp_path} "
@@ -254,6 +281,44 @@ def apply(
         continuous=continuous,
         workers=workers,
     )
+
+
+@app.command()
+def analyze(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report only, don't modify config files."),
+    reset: bool = typer.Option(False, "--reset", help="Reset fixable failures for retry after applying fixes."),
+    job: Optional[str] = typer.Option(None, "--job", help="Analyze a single job by URL (prints failure detail + suggested fix)."),
+    fix: bool = typer.Option(False, "--fix", help="With --job, apply the recommended fix (reset, blocklist, mark manual, ...)."),
+    auto_fix_all: bool = typer.Option(False, "--auto-fix-all", help="Sweep every failed job and apply the per-job fix (resets transient, blocklists Workday+MFA, etc.)."),
+) -> None:
+    """Analyze failures from the last apply run and auto-fix config.
+
+    Per-job mode:
+      applypilot analyze --job <url>            # show what failed, recommend fix
+      applypilot analyze --job <url> --fix      # apply the recommended fix
+      applypilot analyze --job <url> --fix --dry-run  # preview the fix
+
+    Sweep mode:
+      applypilot analyze --auto-fix-all              # apply per-job fix to every failure
+      applypilot analyze --auto-fix-all --dry-run    # preview only
+    """
+    _bootstrap()
+
+    if job:
+        from applypilot.analyze import run_job_analysis
+        rc = run_job_analysis(job, fix=fix, dry_run=dry_run)
+        if rc:
+            raise typer.Exit(code=rc)
+        return
+
+    if auto_fix_all:
+        from applypilot.analyze import run_auto_fix_all
+        run_auto_fix_all(dry_run=dry_run)
+        return
+
+    from applypilot.analyze import run_analysis
+
+    run_analysis(dry_run=dry_run, reset=reset)
 
 
 @app.command()
@@ -333,12 +398,35 @@ def dashboard() -> None:
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (loopback by default)."),
+    port: int = typer.Option(8765, "--port", help="TCP port for the web UI."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev)."),
+) -> None:
+    """Launch the ApplyPilot web UI."""
+    _bootstrap()
+
+    # Import lazily so `applypilot --help` doesn't pull FastAPI in when the
+    # optional [web] extras aren't installed.
+    try:
+        from applypilot.web.server import run_server
+    except ImportError:
+        console.print(
+            "[red]Web extras not installed.[/red] Run: "
+            "pip install -e \".[web]\""
+        )
+        raise typer.Exit(1)
+
+    run_server(host=host, port=port, reload=reload)
+
+
+@app.command()
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        SEARCH_CONFIG_PATH, get_chrome_path,
     )
 
     load_env()
@@ -360,7 +448,7 @@ def doctor() -> None:
     if RESUME_PATH.exists():
         results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
     elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found — plain-text needed for AI stages"))
+        results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
     else:
         results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
 
@@ -368,7 +456,7 @@ def doctor() -> None:
     if SEARCH_CONFIG_PATH.exists():
         results.append(("searches.yaml", ok_mark, str(SEARCH_CONFIG_PATH)))
     else:
-        results.append(("searches.yaml", warn_mark, "Will use example config — run 'applypilot init'"))
+        results.append(("searches.yaml", warn_mark, "Will use example config - run 'applypilot init'"))
 
     # jobspy (discovery dep installed separately)
     try:
@@ -379,21 +467,25 @@ def doctor() -> None:
                         "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
 
     # --- Tier 2 checks ---
-    import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
-    else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+    from applypilot.llm import resolve_llm_config
+
+    try:
+        llm_cfg = resolve_llm_config()
+        if llm_cfg.api_base:
+            results.append(("LLM API key", ok_mark, f"Custom endpoint: {llm_cfg.api_base} ({llm_cfg.model})"))
+        else:
+            label = {
+                "gemini": "Gemini",
+                "openai": "OpenAI",
+                "anthropic": "Anthropic",
+            }.get(llm_cfg.provider, llm_cfg.provider)
+            results.append(("LLM API key", ok_mark, f"{label} ({llm_cfg.model})"))
+    except RuntimeError:
+        results.append(
+            ("LLM API key", fail_mark,
+             "Set one of GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, LLM_URL, "
+             "or set LLM_MODEL with LLM_API_KEY in ~/.applypilot/.env")
+        )
 
     # --- Tier 3 checks ---
     # Claude Code CLI
@@ -420,10 +512,27 @@ def doctor() -> None:
         results.append(("Node.js (npx)", fail_mark,
                         "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
-    # CapSolver (optional)
-    capsolver = os.environ.get("CAPSOLVER_API_KEY")
+    # CapSolver (optional) — verify key via balance endpoint so invalid
+    # keys are surfaced here instead of mid-apply when a CAPTCHA appears.
+    capsolver = (os.environ.get("CAPSOLVER_API_KEY") or "").strip()
     if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
+        try:
+            import httpx
+            resp = httpx.post(
+                "https://api.capsolver.com/getBalance",
+                json={"clientKey": capsolver},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("errorId") == 0:
+                bal = data.get("balance", "?")
+                results.append(("CapSolver API key", ok_mark, f"valid, balance ${bal}"))
+            else:
+                desc = data.get("errorDescription") or data.get("errorCode") or "invalid"
+                results.append(("CapSolver API key", fail_mark, f"rejected by API: {desc}"))
+        except Exception as e:
+            results.append(("CapSolver API key", warn_mark,
+                            f"set but unverifiable: {type(e).__name__}"))
     else:
         results.append(("CapSolver API key", "[dim]optional[/dim]",
                         "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
@@ -442,13 +551,13 @@ def doctor() -> None:
     # Tier summary
     from applypilot.config import get_tier, TIER_LABELS
     tier = get_tier()
-    console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
+    console.print(f"[bold]Current tier: Tier {tier} - {TIER_LABELS[tier]}[/bold]")
 
     if tier == 1:
-        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  -> Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
+        console.print("[dim]  -> Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  -> Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
 
     console.print()
 

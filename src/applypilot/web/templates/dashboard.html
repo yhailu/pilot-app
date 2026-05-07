@@ -1,0 +1,421 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · ApplyPilot{% endblock %}
+{% block breadcrumb %}Dashboard{% endblock %}
+
+{% block content %}
+<div x-data="dashboard()" x-init="load(); pollPipeline(); pollProgress(); loadLastRun(); loadProcs(); pollProcs()" class="space-y-6">
+
+  <!-- Pipeline control panel -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-3">
+        <div class="text-sm font-semibold">Pipeline</div>
+        <span class="text-xs px-2 py-0.5 rounded-full"
+              :class="pipeline.running ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40' : 'bg-ink-900 text-slate-500 border border-ink-700'"
+              x-text="pipeline.running ? '● running' : '○ idle'"></span>
+        <span class="text-xs text-slate-500" x-show="pipeline.running"
+              x-text="`elapsed ${Math.floor((pipeline.elapsed_s || 0) / 60)}m ${Math.floor((pipeline.elapsed_s || 0) % 60)}s · ${pipeline.kind || ''}`"></span>
+        <span class="text-xs text-slate-500" x-show="!pipeline.running && pipeline.rc !== null && pipeline.rc !== undefined"
+              x-text="`last exit code: ${pipeline.rc}`"></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <select x-model="startMode" class="bg-ink-900 border border-ink-700 rounded text-xs px-2 py-1"
+                :disabled="pipeline.running">
+          <option value="chain">chain (run + apply)</option>
+          <option value="run">run only</option>
+          <option value="apply">apply only</option>
+        </select>
+        <button @click="startPipeline()"
+                :disabled="pipeline.running"
+                class="text-xs px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ▶ Start
+        </button>
+        <button @click="stopPipeline()"
+                :disabled="!pipeline.running"
+                class="text-xs px-3 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ■ Stop
+        </button>
+      </div>
+    </div>
+    <div x-show="pipelineError" class="mt-2 text-xs text-rose-300" x-text="pipelineError"></div>
+  </div>
+
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <template x-for="card in cards" :key="card.label">
+      <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500" x-text="card.label"></div>
+        <div class="text-2xl font-semibold mt-1" x-text="card.value"></div>
+        <div class="text-xs text-slate-500 mt-1" x-text="card.hint"></div>
+      </div>
+    </template>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Score distribution</div>
+      <template x-for="row in scoreDist" :key="row.score">
+        <div class="flex items-center gap-2 text-xs my-1">
+          <span class="w-6 text-right" x-text="row.score"></span>
+          <div class="flex-1 h-2 bg-ink-900 rounded">
+            <div class="h-2 rounded" :style="`width:${row.pct}%; background:${row.color}`"></div>
+          </div>
+          <span class="w-10 text-slate-400 text-right" x-text="row.count"></span>
+        </div>
+      </template>
+      <div x-show="!scoreDist.length" class="text-xs text-slate-500">No scored jobs yet.</div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Jobs by source</div>
+      <template x-for="row in bySite" :key="row.site">
+        <div class="flex items-center justify-between text-xs py-1 border-b border-ink-700 last:border-0">
+          <span class="truncate" x-text="row.site || '?'"></span>
+          <span class="text-slate-400" x-text="row.count"></span>
+        </div>
+      </template>
+      <div x-show="!bySite.length" class="text-xs text-slate-500">No jobs yet.</div>
+    </div>
+
+    <div class="bg-ink-800 border border-ink-700 rounded-lg p-4 lg:col-span-1">
+      <div class="text-sm font-semibold mb-3">Cost (worker logs)</div>
+      <div class="text-2xl font-semibold" x-text="'$' + costTotal.toFixed(4)"></div>
+      <div class="text-xs text-slate-500">total across all worker logs</div>
+      <div class="mt-3 space-y-1 text-xs">
+        <template x-for="bucket in costByDay.slice(0, 7)" :key="bucket.date">
+          <div class="flex justify-between">
+            <span x-text="bucket.date"></span>
+            <span class="text-slate-400" x-text="'$' + bucket.cost_usd.toFixed(4) + ' · ' + bucket.runs + ' runs'"></span>
+          </div>
+        </template>
+        <div x-show="!costByDay.length" class="text-slate-500">no worker-*.log entries with total_cost_usd yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Last run summary (only visible when nothing is running and we have a snapshot) -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4"
+       x-show="!pipeline.running && lastRun && lastRun.ended_at">
+    <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+      <div class="text-sm font-semibold flex items-center gap-2">
+        <span>Last run</span>
+        <span class="text-xs px-2 py-0.5 rounded-full"
+              :class="lastRun?.rc === 0 ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40'
+                                        : 'bg-rose-900/40 text-rose-300 border border-rose-700/40'"
+              x-text="lastRun?.rc === 0 ? '✓ completed' : `✗ rc=${lastRun?.rc}`"></span>
+        <span class="text-xs text-slate-500" x-text="lastRun?.kind || ''"></span>
+      </div>
+      <div class="text-xs text-slate-500" x-text="lastRunSummaryRange"></div>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ jobs</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.total > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.total >= 0 ? '+' : '') + (lastRun?.deltas?.total ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ tailored</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.tailored > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.tailored >= 0 ? '+' : '') + (lastRun?.deltas?.tailored ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ applied</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.applied > 0 ? 'text-emerald-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.applied >= 0 ? '+' : '') + (lastRun?.deltas?.applied ?? 0)"></div>
+      </div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2">
+        <div class="text-slate-500 text-[10px] uppercase">+ failed</div>
+        <div class="text-lg font-mono" :class="lastRun?.deltas?.failed > 0 ? 'text-rose-400' : 'text-slate-300'"
+             x-text="(lastRun?.deltas?.failed >= 0 ? '+' : '') + (lastRun?.deltas?.failed ?? 0)"></div>
+      </div>
+    </div>
+    <div class="mt-3 text-xs text-slate-500">
+      Last stage seen: <span class="text-slate-300" x-text="lastRun?.stages_seen || '?'"></span>
+      &middot; tailored this run: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.tailored ?? 0"></span>
+      &middot; cover letters: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.cover_letter ?? 0"></span>
+      &middot; applied: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.applied ?? 0"></span>
+      &middot; failed: <span class="text-slate-300 font-mono" x-text="lastRun?.stage_counts?.failed ?? 0"></span>
+    </div>
+  </div>
+
+  <!-- Pipeline progress (only visible while pipeline is running OR has recent completions) -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4"
+       x-show="pipeline.running || (progress.completed && progress.completed.length)">
+    <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+      <div class="text-sm font-semibold">Pipeline progress</div>
+      <div class="flex gap-1 text-[10px] flex-wrap">
+        <template x-for="stage in stages" :key="stage">
+          <span class="px-2 py-0.5 rounded border whitespace-nowrap"
+                :class="progress.current_stage === stage
+                  ? 'bg-brand-500/30 border-brand-400 text-brand-400'
+                  : (stagesPassed.includes(stage)
+                    ? 'border-ink-700 text-emerald-400'
+                    : 'border-ink-700 text-slate-500')"
+                x-text="stage"></span>
+        </template>
+      </div>
+    </div>
+
+    <!-- Current action -->
+    <div class="bg-ink-900 border border-ink-700 rounded p-3 mb-3 min-h-[3.5rem]">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Currently</div>
+      <div class="flex items-center gap-2">
+        <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse" x-show="pipeline.running"></span>
+        <span class="text-sm" :class="pipeline.running ? 'text-slate-200' : 'text-slate-500'"
+              x-text="progress.current_action || (pipeline.running ? `${progress.current_stage || 'starting'}…` : 'idle')"></span>
+      </div>
+      <div class="text-xs text-slate-500 mt-1 flex flex-wrap gap-3" x-show="progress.stage_counts">
+        <span>tailored: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.tailored || 0"></span></span>
+        <span>cover letters: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.cover_letter || 0"></span></span>
+        <span>applied: <span class="text-emerald-400 font-mono" x-text="progress.stage_counts?.applied || 0"></span></span>
+        <span>failed: <span class="text-rose-400 font-mono" x-text="progress.stage_counts?.failed || 0"></span></span>
+      </div>
+    </div>
+
+    <!-- Live tail of meaningful log lines (always visible while running) -->
+    <div x-show="progress.recent_activity && progress.recent_activity.length" class="mb-3">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Live tail</div>
+      <div class="bg-ink-900 border border-ink-700 rounded p-2 max-h-40 overflow-auto font-mono text-[11px] leading-relaxed">
+        <template x-for="(line, idx) in progress.recent_activity" :key="idx + line">
+          <div class="text-slate-300 whitespace-pre-wrap break-words" x-text="line"></div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Recent completions -->
+    <div x-show="progress.completed && progress.completed.length">
+      <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Recently completed</div>
+      <div class="space-y-1 max-h-64 overflow-auto pr-1">
+        <template x-for="(item, idx) in progress.completed" :key="idx + '-' + item.name">
+          <div class="flex items-center gap-2 text-xs py-1 border-b border-ink-700/40 last:border-0">
+            <span class="px-1.5 py-0.5 rounded text-[10px] font-mono whitespace-nowrap"
+                  :class="{
+                    'bg-emerald-700/30 text-emerald-300': item.kind === 'tailored',
+                    'bg-blue-700/30 text-blue-300': item.kind === 'cover_letter',
+                    'bg-brand-500/30 text-brand-400': item.kind === 'applied',
+                    'bg-rose-700/30 text-rose-300': item.kind === 'failed',
+                    'bg-amber-600/30 text-amber-300': item.kind === 'scored',
+                  }"
+                  x-text="item.subkind || item.kind.replace('_', ' ')"></span>
+            <span class="text-slate-300 truncate flex-1" x-text="item.name"></span>
+            <span class="text-slate-500 font-mono whitespace-nowrap" x-text="item.at || ''"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Process tracker -->
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <div class="text-sm font-semibold">Processes
+        <span class="text-xs text-slate-500 font-normal">(ApplyPilot-spawned only)</span>
+      </div>
+      <div class="flex gap-2">
+        <button @click="loadProcs()" class="text-xs px-2 py-1 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400">↻ Refresh</button>
+        <button @click="killRogueChrome()"
+                :disabled="!procs.some(p => p.role === 'chrome')"
+                class="text-xs px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+          ☒ Kill all rogue Chrome
+        </button>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase text-[10px]">
+          <tr>
+            <th class="text-left px-2 py-1">PID</th>
+            <th class="text-left px-2 py-1">Role</th>
+            <th class="text-left px-2 py-1">Name</th>
+            <th class="text-left px-2 py-1">CPU</th>
+            <th class="text-left px-2 py-1">Mem</th>
+            <th class="text-left px-2 py-1">Age</th>
+            <th class="text-left px-2 py-1">Cmdline</th>
+            <th class="text-right px-2 py-1"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="p in procs" :key="p.pid">
+            <tr class="border-t border-ink-700/60">
+              <td class="px-2 py-1 font-mono" x-text="p.pid"></td>
+              <td class="px-2 py-1">
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono"
+                      :class="{
+                        'bg-brand-500/20 text-brand-400': p.role === 'chrome',
+                        'bg-emerald-700/30 text-emerald-300': p.role === 'python',
+                        'bg-amber-600/30 text-amber-300': p.role === 'node',
+                        'bg-rose-600/30 text-rose-300': p.role === 'claude',
+                        'bg-ink-900 text-slate-400': p.role === 'other',
+                      }"
+                      x-text="p.role"></span>
+              </td>
+              <td class="px-2 py-1 text-slate-300" x-text="p.name"></td>
+              <td class="px-2 py-1 text-slate-400" x-text="p.cpu_pct + '%'"></td>
+              <td class="px-2 py-1 text-slate-400" x-text="p.mem_mb.toFixed(0) + ' MB'"></td>
+              <td class="px-2 py-1 text-slate-400"
+                  x-text="p.age_s < 60 ? p.age_s + 's' : Math.floor(p.age_s/60) + 'm ' + (p.age_s%60) + 's'"></td>
+              <td class="px-2 py-1 text-slate-500 font-mono text-[10px] max-w-md truncate" :title="p.cmdline" x-text="p.cmdline"></td>
+              <td class="px-2 py-1 text-right">
+                <button @click="killProc(p)"
+                        :disabled="p.is_self"
+                        :title="p.is_self ? 'cannot kill UI server itself' : 'kill process and children'"
+                        class="text-xs px-2 py-0.5 rounded bg-rose-800 hover:bg-rose-700 disabled:bg-ink-700 disabled:text-slate-500 disabled:cursor-not-allowed">
+                  Kill
+                </button>
+              </td>
+            </tr>
+          </template>
+          <tr x-show="!procs.length">
+            <td colspan="8" class="text-center text-slate-500 px-2 py-4">No ApplyPilot processes running.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-sm font-semibold">Live activity</div>
+      <div class="text-xs text-slate-500">tails newest run/chain/auto-loop/apply log</div>
+    </div>
+    <div class="bg-ink-900 border border-ink-700 rounded p-3 h-72 overflow-auto font-mono text-xs"
+         x-ref="activity"
+         hx-ext="sse"
+         sse-connect="/api/activity"
+         sse-swap="line,action"
+         hx-swap="beforeend">
+    </div>
+  </div>
+</div>
+
+<script>
+  function dashboard() {
+    return {
+      cards: [],
+      scoreDist: [],
+      bySite: [],
+      costTotal: 0,
+      costByDay: [],
+      pipeline: { running: false, rc: null, elapsed_s: 0, kind: null },
+      pipelineError: '',
+      startMode: 'chain',
+      progress: { current_stage: null, current_action: null, completed: [], stage_counts: {} },
+      lastRun: null,
+      get lastRunSummaryRange() {
+        if (!this.lastRun?.started_at) return '';
+        const fmt = (sec) => new Date(sec * 1000).toLocaleString();
+        const dur = this.lastRun.duration_s;
+        const m = Math.floor(dur / 60);
+        const s = Math.floor(dur % 60);
+        const durLabel = m > 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m ${s}s`;
+        return `${fmt(this.lastRun.started_at)} → ${fmt(this.lastRun.ended_at)}  ·  ${durLabel}`;
+      },
+      async loadLastRun() {
+        try {
+          const data = await (await fetch('/api/pipeline/last_run')).json();
+          this.lastRun = data?.present === false ? null : data;
+        } catch (_) { this.lastRun = null; }
+        // Re-fetch when pipeline transitions running → idle
+        // (pollProgress also covers this; keep it simple here)
+      },
+      stages: ['discover', 'enrich', 'score', 'tailor', 'cover', 'pdf', 'apply'],
+      get stagesPassed() {
+        if (!this.progress.current_stage) return [];
+        const idx = this.stages.indexOf(this.progress.current_stage);
+        return idx <= 0 ? [] : this.stages.slice(0, idx);
+      },
+      _wasRunning: false,
+      async pollProgress() {
+        try {
+          this.progress = await (await fetch('/api/pipeline/progress')).json();
+          // If we just transitioned from running → idle, refresh the Last run card
+          const isRunning = !!this.pipeline.running;
+          if (this._wasRunning && !isRunning) {
+            await this.loadLastRun();
+          }
+          this._wasRunning = isRunning;
+        } catch (_) {}
+        setTimeout(() => this.pollProgress(), 3000);
+      },
+      procs: [],
+      async loadProcs() {
+        try {
+          const data = await (await fetch('/api/processes')).json();
+          this.procs = data.items || [];
+        } catch (_) {}
+      },
+      async pollProcs() {
+        await this.loadProcs();
+        setTimeout(() => this.pollProcs(), 8000);
+      },
+      async killProc(p) {
+        if (!confirm(`Kill ${p.role} pid=${p.pid}?\n\n${p.cmdline.slice(0, 200)}`)) return;
+        try {
+          const r = await fetch(`/api/processes/${p.pid}/kill`, { method: 'POST' });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            alert('kill failed: ' + (e.detail || r.status));
+          }
+          await this.loadProcs();
+        } catch (e) { alert(String(e)); }
+      },
+      async killRogueChrome() {
+        if (!confirm('Kill all ApplyPilot-spawned Chrome processes? Your regular browser is unaffected.')) return;
+        try {
+          const r = await fetch('/api/processes/kill-rogue-chrome', { method: 'POST' });
+          const data = await r.json();
+          alert(`Killed ${data.killed.length} processes` + (data.errors.length ? `; errors: ${data.errors.join(', ')}` : ''));
+          await this.loadProcs();
+        } catch (e) { alert(String(e)); }
+      },
+      async pollPipeline() {
+        try {
+          this.pipeline = await (await fetch('/api/pipeline/status')).json();
+        } catch (e) { /* ignore transient */ }
+        setTimeout(() => this.pollPipeline(), 5000);
+      },
+      async startPipeline() {
+        this.pipelineError = '';
+        try {
+          const resp = await fetch('/api/pipeline/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: this.startMode}),
+          });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            this.pipelineError = err.detail || ('start failed: ' + resp.status);
+          }
+          await this.pollPipeline();
+        } catch (e) { this.pipelineError = String(e); }
+      },
+      async stopPipeline() {
+        this.pipelineError = '';
+        try {
+          await fetch('/api/pipeline/stop', {method: 'POST'});
+          await this.pollPipeline();
+        } catch (e) { this.pipelineError = String(e); }
+      },
+      async load() {
+        const stats = await (await fetch('/api/stats')).json();
+        const cost  = await (await fetch('/api/cost')).json();
+        this.cards = [
+          { label: 'Total jobs',  value: stats.total,            hint: stats.with_description + ' enriched' },
+          { label: 'Scored',       value: stats.scored,           hint: stats.unscored + ' pending' },
+          { label: 'Tailored',     value: stats.tailored,         hint: stats.untailored_eligible + ' eligible' },
+          { label: 'Applied',      value: stats.applied,          hint: stats.apply_errors + ' errors' },
+        ];
+        const max = Math.max(1, ...stats.score_distribution.map(r => r[1]));
+        this.scoreDist = stats.score_distribution.map(([s, c]) => ({
+          score: s,
+          count: c,
+          pct: Math.round(c / max * 100),
+          color: s >= 7 ? '#10b981' : s >= 5 ? '#f59e0b' : '#ef4444',
+        }));
+        this.bySite   = stats.by_site.map(([site, count]) => ({ site, count }));
+        this.costTotal = cost.total_usd;
+        this.costByDay = cost.by_day;
+      }
+    };
+  }
+</script>
+{% endblock %}

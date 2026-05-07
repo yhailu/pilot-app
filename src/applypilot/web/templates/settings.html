@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Settings · ApplyPilot{% endblock %}
+{% block breadcrumb %}<a href="/dashboard" class="hover:text-slate-200">Dashboard</a> / Settings{% endblock %}
+
+{% block content %}
+<div x-data="settingsPage({{ models | tojson }})" class="space-y-6 max-w-3xl">
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-sm font-semibold mb-2">LLM model</div>
+    <div class="text-xs text-slate-500 mb-3">
+      Switching here updates the running web server's LLM client. The background auto-loop subprocess
+      keeps the model it was launched with — restart it for the change to apply there too.
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <select x-model="selected" class="bg-ink-900 border border-ink-700 rounded px-2 py-1 text-sm">
+        <template x-for="opt in options" :key="opt.id">
+          <option :value="opt.id" x-text="opt.label + ' (' + opt.id + ')'"></option>
+        </template>
+        <option value="__custom__">Custom...</option>
+      </select>
+      <input x-show="selected === '__custom__'" x-model="custom"
+             placeholder="provider/model-id"
+             class="bg-ink-900 border border-ink-700 rounded px-2 py-1 text-sm flex-1 min-w-[12rem]">
+      <button class="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-400 text-white text-sm"
+              @click="save()">Save</button>
+      <span x-show="msg" class="text-xs text-slate-400" x-text="msg"></span>
+    </div>
+    <div class="mt-2 text-xs text-slate-500">
+      Currently active: <span class="font-mono" x-text="current || '(default)'"></span>
+    </div>
+  </div>
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-sm font-semibold mb-2">API keys (masked)</div>
+    <table class="w-full text-sm">
+      <thead class="text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th class="text-left py-1">Provider</th>
+          <th class="text-left py-1">Status</th>
+          <th class="text-left py-1">Preview</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="provider in ['gemini', 'anthropic', 'openai']" :key="provider">
+          <tr class="border-t border-ink-700">
+            <td class="py-1.5 font-mono" x-text="provider"></td>
+            <td class="py-1.5">
+              <template x-if="keys[provider]">
+                <span class="text-ok">configured</span>
+              </template>
+              <template x-if="!keys[provider]">
+                <span class="text-slate-500">not set</span>
+              </template>
+            </td>
+            <td class="py-1.5 font-mono text-xs text-slate-400" x-text="keys[provider] || '—'"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="text-xs text-slate-500 mt-2">
+      Edit <span class="font-mono">~/.applypilot/.env</span> and restart the server to add or change keys.
+    </div>
+  </div>
+</div>
+
+<script>
+  function settingsPage(initial) {
+    return {
+      options: initial.options,
+      keys: initial.keys,
+      current: initial.current,
+      selected: initial.current && initial.options.some(o => o.id === initial.current) ? initial.current : (initial.options[0] && initial.options[0].id),
+      custom: '',
+      msg: '',
+      async save() {
+        const id = this.selected === '__custom__' ? this.custom.trim() : this.selected;
+        if (!id) { this.msg = 'enter a model id'; return; }
+        const res = await fetch('/api/models/select', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model_id: id }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          this.current = data.model_id;
+          this.msg = 'saved';
+        } else {
+          this.msg = 'error: ' + res.status;
+        }
+      }
+    };
+  }
+</script>
+{% endblock %}

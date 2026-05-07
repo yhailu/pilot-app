@@ -1,0 +1,28 @@
+{# HTMX 10s-refresh partial for dashboard counters.
+   The dashboard.html template uses Alpine + fetch() by default, but this
+   server-rendered fallback is provided for future hx-trigger="every 10s"
+   swaps if we want to drop the JS path. #}
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4"
+     hx-get="/api/stats" hx-trigger="every 10s"
+     hx-target="this" hx-swap="outerHTML">
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Total jobs</div>
+    <div class="text-2xl font-semibold mt-1">{{ stats.total }}</div>
+    <div class="text-xs text-slate-500 mt-1">{{ stats.with_description }} enriched</div>
+  </div>
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Scored</div>
+    <div class="text-2xl font-semibold mt-1">{{ stats.scored }}</div>
+    <div class="text-xs text-slate-500 mt-1">{{ stats.unscored }} pending</div>
+  </div>
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Tailored</div>
+    <div class="text-2xl font-semibold mt-1">{{ stats.tailored }}</div>
+    <div class="text-xs text-slate-500 mt-1">{{ stats.untailored_eligible }} eligible</div>
+  </div>
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500">Applied</div>
+    <div class="text-2xl font-semibold mt-1">{{ stats.applied }}</div>
+    <div class="text-xs text-slate-500 mt-1">{{ stats.apply_errors }} errors</div>
+  </div>
+</div>

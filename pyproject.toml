@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "typer>=0.9.0",
     "rich>=13.0",
+    "litellm~=1.63.0",
     "httpx>=0.24",
     "beautifulsoup4>=4.12",
     "playwright>=1.40",
@@ -30,6 +31,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.1"]
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "sse-starlette>=2.0",
+    "python-multipart>=0.0.9",
+    "psutil>=5.9",
+]
 
 [project.scripts]
 applypilot = "applypilot.cli:app"
@@ -47,7 +56,11 @@ build-backend = "hatchling.build"
 packages = ["src/applypilot"]
 
 [tool.hatch.build]
-artifacts = ["src/applypilot/config/*.yaml"]
+artifacts = [
+    "src/applypilot/config/*.yaml",
+    "src/applypilot/web/templates/**/*.html",
+    "src/applypilot/web/static/**/*",
+]
 
 [tool.ruff]
 target-version = "py311"

@@ -5,14 +5,15 @@ postings. All personal data (name, skills, achievements) comes from the user's
 profile at runtime. No hardcoded personal information.
 """
 
-import json
 import logging
 import re
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -24,6 +25,43 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+_FALLBACK_MIN_RATIO = 0.4
+
+
+def _find_similar_cover_letter(job: dict) -> Path | None:
+    """Pick the closest existing cover letter by site+title similarity.
+
+    Used as a fallback when the LLM call fails so the apply queue isn't
+    blocked on cover-letter generation. Returns None if no candidate
+    clears the ratio threshold.
+    """
+    if not COVER_LETTER_DIR.exists():
+        return None
+
+    target = f"{job.get('site') or ''} {job.get('title') or ''}".lower().strip()
+    if not target:
+        return None
+
+    target_prefix = re.sub(
+        r"[^\w\s-]", "",
+        f"{(job.get('site') or '')[:20]}_{(job.get('title') or '')[:50]}",
+    ).replace(" ", "_")
+
+    candidates: list[Path] = []
+    for path in COVER_LETTER_DIR.glob("*_CL.txt"):
+        if target_prefix and path.stem.startswith(target_prefix):
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+
+    def _score(path: Path) -> float:
+        # Strip trailing "_<6hex>_CL" → site_title
+        stem = re.sub(r"_[0-9a-f]{6}_CL$", "", path.stem)
+        return SequenceMatcher(None, target, stem.replace("_", " ").lower()).ratio()
+
+    best = max(candidates, key=_score)
+    return best if _score(best) >= _FALLBACK_MIN_RATIO else None
 
 
 # ── Prompt Builder (profile-driven) ──────────────────────────────────────
@@ -165,7 +203,17 @@ def generate_cover_letter(
             )},
         ]
 
-        letter = client.chat(messages, max_tokens=1024, temperature=0.7)
+        try:
+            letter = client.chat(messages, max_output_tokens=10000)
+        except Exception as llm_exc:
+            fallback = _find_similar_cover_letter(job)
+            if fallback is None:
+                raise
+            log.warning(
+                "Cover letter LLM call failed (%s); reusing similar letter %s.",
+                llm_exc, fallback.name,
+            )
+            return fallback.read_text(encoding="utf-8")
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
@@ -237,10 +285,12 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             letter = generate_cover_letter(resume_text, job, profile,
                                           validation_mode=validation_mode)
 
-            # Build safe filename prefix
+            # Build safe filename prefix with job_id to prevent overwrites
+            import hashlib
             safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
             safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            job_id = hashlib.md5(job["url"].encode("utf-8")).hexdigest()[:6]
+            prefix = f"{safe_site}_{safe_title}_{job_id}"
 
             cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
             cl_path.write_text(letter, encoding="utf-8")

@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}Jobs · ApplyPilot{% endblock %}
+{% block breadcrumb %}<a href="/dashboard" class="hover:text-slate-200">Dashboard</a> / Jobs{% endblock %}
+
+{% block content %}
+<div x-data="jobsPage()" x-init="loadSites(); load()">
+
+  <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 mb-4 sticky top-0 z-10" x-data="{ filtersOpen: false }">
+    <!-- Mobile: collapsed filter trigger -->
+    <div class="md:hidden flex items-center gap-2 text-xs">
+      <input type="search" placeholder="search title or description"
+             x-model.debounce.400ms="filters.q" @input="load()"
+             class="flex-1 bg-ink-900 border border-ink-700 rounded px-2 py-2">
+      <button @click="filtersOpen = !filtersOpen"
+              class="px-3 py-2 rounded border border-ink-700 whitespace-nowrap"
+              :class="filtersOpen ? 'bg-brand-500/30 border-brand-400 text-brand-400' : ''">
+        <span x-text="filtersOpen ? '× Hide' : '⛭ Filters'"></span>
+      </button>
+      <span class="text-slate-500 whitespace-nowrap" x-text="`${total} matches`"></span>
+    </div>
+
+    <!-- Desktop + expanded mobile: full filter bar -->
+    <div class="flex flex-wrap items-center gap-2 text-xs"
+         :class="{ 'hidden md:flex': !filtersOpen, 'flex mt-3 md:mt-0': filtersOpen }">
+      <template x-for="opt in statusPills" :key="opt.value">
+        <button class="px-2 py-1 rounded border"
+                :class="filters.status === opt.value
+                  ? 'bg-brand-500/30 border-brand-400 text-brand-400'
+                  : 'border-ink-700 hover:border-brand-400'"
+                @click="filters.status = (filters.status === opt.value ? null : opt.value); load()"
+                x-text="opt.label"></button>
+      </template>
+
+      <select x-model="filters.site" @change="load()" class="bg-ink-900 border border-ink-700 rounded px-2 py-1">
+        <option :value="null">All sites</option>
+        <template x-for="s in sites" :key="s.site">
+          <option :value="s.site" x-text="`${s.site} (${s.count})`"></option>
+        </template>
+      </select>
+
+      <label class="flex items-center gap-1">min
+        <input type="number" min="0" max="10" x-model.number="filters.min_score" @change="load()"
+               class="w-12 bg-ink-900 border border-ink-700 rounded px-1 py-1 text-center">
+      </label>
+      <label class="flex items-center gap-1">max
+        <input type="number" min="0" max="10" x-model.number="filters.max_score" @change="load()"
+               class="w-12 bg-ink-900 border border-ink-700 rounded px-1 py-1 text-center">
+      </label>
+
+      <input type="search" placeholder="search title or description"
+             x-model.debounce.400ms="filters.q" @input="load()"
+             class="hidden md:block flex-1 min-w-[12rem] bg-ink-900 border border-ink-700 rounded px-2 py-1">
+
+      <span class="hidden md:inline text-slate-500 ml-auto" x-text="`${total} matches`"></span>
+    </div>
+  </div>
+
+  <!-- Mobile: stacked card view -->
+  <div class="md:hidden space-y-2">
+    <template x-for="row in items" :key="row.url">
+      <div class="bg-ink-800 border border-ink-700 rounded-lg p-3 relative">
+        <span class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-xs font-mono"
+              :class="scoreClass(row.fit_score)"
+              x-text="row.fit_score ?? '—'"></span>
+        <a class="block text-sm font-medium text-brand-400 hover:underline pr-10"
+           :href="`/jobs/${encodeURIComponent(row.url)}`"
+           x-text="row.title || '(untitled)'"></a>
+        <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          <span x-text="row.site"></span>
+          <span x-show="row.location" x-text="row.location"></span>
+          <span class="text-slate-500" x-text="(row.discovered_at || '').slice(0, 10)"></span>
+        </div>
+        <div class="text-xs mt-1 flex items-center justify-between gap-2 flex-wrap">
+          <span x-text="statusLabel(row)"></span>
+          <button class="text-xs px-3 py-1.5 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="tailorState[row.url]?.status === 'running'"
+                  @click="retailor(row)"
+                  x-text="row.tailored_resume_path ? '↻ Re-tailor' : '✎ Tailor'"></button>
+        </div>
+        <!-- Inline tailor progress -->
+        <div x-show="tailorState[row.url]" class="mt-1 text-[11px]">
+          <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse mr-1" x-show="tailorState[row.url]?.status === 'running'"></span>
+          <span :class="tailorState[row.url]?.status === 'done'
+                        ? (tailorState[row.url]?.rc === 0 ? 'text-emerald-400' : 'text-rose-400')
+                        : 'text-slate-400'"
+                x-text="tailorState[row.url]?.message"></span>
+        </div>
+      </div>
+    </template>
+    <div x-show="!items.length" class="text-center text-slate-500 px-3 py-6">
+      No jobs match the current filters.
+    </div>
+  </div>
+
+  <!-- Desktop: table view -->
+  <div class="hidden md:block bg-ink-800 border border-ink-700 rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-ink-900 text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('fit_score')">Score</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('title')">Title</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('site')">Site</th>
+          <th class="text-left px-3 py-2">Location</th>
+          <th class="text-left px-3 py-2">Status</th>
+          <th class="text-left px-3 py-2 cursor-pointer" @click="sortBy('discovered_at')">Discovered</th>
+          <th class="text-left px-3 py-2">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="row in items" :key="row.url">
+          <tr class="border-t border-ink-700 hover:bg-ink-700/40 align-top">
+            <td class="px-3 py-2">
+              <span class="px-1.5 py-0.5 rounded text-xs font-mono"
+                    :class="scoreClass(row.fit_score)"
+                    x-text="row.fit_score ?? '—'"></span>
+            </td>
+            <td class="px-3 py-2">
+              <a class="text-brand-400 hover:underline" :href="`/jobs/${encodeURIComponent(row.url)}`" x-text="row.title || '(untitled)'"></a>
+              <div class="text-xs text-slate-500" x-show="row.salary" x-text="row.salary"></div>
+            </td>
+            <td class="px-3 py-2 text-slate-300" x-text="row.site"></td>
+            <td class="px-3 py-2 text-slate-400" x-text="row.location || '—'"></td>
+            <td class="px-3 py-2">
+              <span class="text-xs" x-text="statusLabel(row)"></span>
+              <!-- Inline tailor progress -->
+              <div x-show="tailorState[row.url]" class="mt-1 text-[11px]">
+                <span class="inline-block w-2 h-2 rounded-full bg-brand-400 animate-pulse mr-1" x-show="tailorState[row.url]?.status === 'running'"></span>
+                <span :class="tailorState[row.url]?.status === 'done'
+                              ? (tailorState[row.url]?.rc === 0 ? 'text-emerald-400' : 'text-rose-400')
+                              : 'text-slate-400'"
+                      x-text="tailorState[row.url]?.message"></span>
+              </div>
+            </td>
+            <td class="px-3 py-2 text-xs text-slate-500" x-text="(row.discovered_at || '').slice(0, 16).replace('T', ' ')"></td>
+            <td class="px-3 py-2">
+              <button class="text-xs px-2 py-1 rounded border border-ink-700 hover:border-brand-400 hover:text-brand-400 disabled:opacity-40 disabled:cursor-not-allowed"
+                      :disabled="tailorState[row.url]?.status === 'running'"
+                      @click="retailor(row)"
+                      :title="row.tailored_resume_path ? 'Re-tailor with current model' : 'Tailor with current model'"
+                      x-text="row.tailored_resume_path ? '↻ Re-tailor' : '✎ Tailor'"></button>
+            </td>
+          </tr>
+        </template>
+        <tr x-show="!items.length">
+          <td colspan="7" class="text-center text-slate-500 px-3 py-6">No jobs match the current filters.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="flex items-center justify-between mt-3 text-xs text-slate-500">
+    <button class="px-3 py-1 rounded border border-ink-700 disabled:opacity-40"
+            :disabled="offset === 0"
+            @click="offset = Math.max(0, offset - limit); load()">Previous</button>
+    <span x-text="`page ${Math.floor(offset / limit) + 1} of ${Math.max(1, Math.ceil(total / limit))}`"></span>
+    <button class="px-3 py-1 rounded border border-ink-700 disabled:opacity-40"
+            :disabled="offset + limit >= total"
+            @click="offset += limit; load()">Next</button>
+  </div>
+</div>
+
+<script>
+  function jobsPage() {
+    return {
+      items: [],
+      sites: [],
+      total: 0,
+      offset: 0,
+      limit: 50,
+      sort: 'discovered_at',
+      direction: 'desc',
+      filters: { status: null, site: null, min_score: null, max_score: null, q: '' },
+      tailorState: {},  // url -> { status: 'running'|'done', rc, message, lines }
+      async retailor(row) {
+        // Mark this row as running and POST to start a stream
+        this.tailorState[row.url] = { status: 'running', message: 'starting…', lines: 0, rc: null };
+        let stream;
+        try {
+          const resp = await fetch(`/api/jobs/${encodeURIComponent(row.url)}/retailor`, { method: 'POST' });
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            this.tailorState[row.url] = { status: 'done', rc: -1, message: 'failed: ' + (err.detail || resp.status) };
+            return;
+          }
+          stream = await resp.json();
+        } catch (e) {
+          this.tailorState[row.url] = { status: 'done', rc: -1, message: 'error: ' + e };
+          return;
+        }
+        // Subscribe to SSE for live progress
+        const es = new EventSource(`/api/streams/${stream.stream_id}`);
+        let lineCount = 0;
+        es.addEventListener('line', () => {
+          lineCount += 1;
+          this.tailorState[row.url] = { status: 'running', message: `tailoring… ${lineCount} lines`, lines: lineCount, rc: null };
+        });
+        es.addEventListener('action', () => {
+          lineCount += 1;
+          this.tailorState[row.url] = { status: 'running', message: `tailoring… ${lineCount} steps`, lines: lineCount, rc: null };
+        });
+        es.addEventListener('done', (ev) => {
+          let rc = null;
+          try { rc = JSON.parse(ev.data).rc; } catch (_) { rc = -1; }
+          this.tailorState[row.url] = {
+            status: 'done',
+            rc,
+            message: rc === 0 ? `tailored ✓ (${lineCount} lines)` : `failed (rc=${rc})`,
+          };
+          es.close();
+          // Refresh the list so the row reflects the new tailored_resume_path
+          this.load();
+        });
+        es.addEventListener('error', () => {
+          es.close();
+          if (this.tailorState[row.url]?.status === 'running') {
+            this.tailorState[row.url] = { status: 'done', rc: -1, message: 'stream lost' };
+          }
+        });
+      },
+      statusPills: [
+        { value: 'pending',  label: 'Pending' },
+        { value: 'scored',   label: 'Scored' },
+        { value: 'tailored', label: 'Tailored' },
+        { value: 'ready',    label: 'Ready to apply' },
+        { value: 'applied',  label: 'Applied' },
+        { value: 'failed',   label: 'Failed' },
+      ],
+      async loadSites() {
+        try { this.sites = await (await fetch('/api/sites')).json(); } catch (_) { this.sites = []; }
+      },
+      sortBy(col) {
+        if (this.sort === col) {
+          this.direction = this.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+          this.sort = col;
+          this.direction = 'desc';
+        }
+        this.load();
+      },
+      async load() {
+        const p = new URLSearchParams();
+        p.set('limit', this.limit);
+        p.set('offset', this.offset);
+        p.set('sort', this.sort);
+        p.set('direction', this.direction);
+        for (const k of ['status', 'site', 'q']) {
+          if (this.filters[k]) p.set(k, this.filters[k]);
+        }
+        if (this.filters.min_score !== null && this.filters.min_score !== '') p.set('min_score', this.filters.min_score);
+        if (this.filters.max_score !== null && this.filters.max_score !== '') p.set('max_score', this.filters.max_score);
+        const data = await (await fetch('/api/jobs?' + p.toString())).json();
+        this.items = data.items;
+        this.total = data.total;
+      },
+      scoreClass(s) {
+        if (s == null) return 'bg-ink-900 text-slate-500';
+        if (s >= 7) return 'bg-ok/20 text-ok';
+        if (s >= 5) return 'bg-warn/20 text-warn';
+        return 'bg-bad/20 text-bad';
+      },
+      statusLabel(row) {
+        if (row.applied_at) return 'applied';
+        if (row.apply_status === 'failed') return 'failed: ' + (row.apply_error || '?');
+        if (row.tailored_resume_path) return 'tailored';
+        if (row.fit_score != null) return 'scored';
+        return 'pending';
+      }
+    };
+  }
+</script>
+{% endblock %}
